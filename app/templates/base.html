@@ -831,7 +831,7 @@ eyJ..."></textarea>
 
     <!-- 成员管理 模态框 -->
     <div id="manageMembersModal" class="modal-overlay">
-        <div class="modal" style="max-width: 800px;">
+        <div class="modal modal-wide">
             <div class="modal-header">
                 <div>
                     <h3 id="modalTeamName">Team 成员管理</h3>
@@ -865,17 +865,54 @@ eyJ..."></textarea>
                     </form>
                 </div>
 
+                <!-- 定时踢人：批量配置 -->
+                <div class="content-section"
+                    style="padding: 1rem 1.25rem; margin-bottom: 1.5rem; background: rgba(255,255,255,0.03);">
+                    <div class="kick-toolbar-head">
+                        <span class="kick-toolbar-title">定时踢人</span>
+                        <span class="kick-count-badge" id="timedKickCountBadge">
+                            已选 <b id="timedKickSelectedCount">0</b> 个
+                        </span>
+                    </div>
+
+                    <div class="kick-time-row">
+                        <div class="kick-time-picker" id="kickTimePicker">
+                            <button type="button" class="kick-time-field" id="kickTimeTrigger"
+                                onclick="toggleKickCalendar()" aria-haspopup="dialog" aria-expanded="false">
+                                <i data-lucide="clock"></i>
+                                <span class="kick-time-value is-placeholder" id="timedKickAtDisplay">选择踢出时间</span>
+                                <i data-lucide="calendar-days"></i>
+                            </button>
+                            <input type="hidden" id="timedKickAt">
+                        </div>
+
+                        <button type="button" class="btn btn-primary" id="timedKickApplyBtn"
+                            onclick="applyTimedKick(false)">应用</button>
+                        <button type="button" class="btn btn-secondary"
+                            onclick="applyTimedKick(true)">取消定时</button>
+                    </div>
+
+                    <div class="kick-time-preview" id="timedKickPreview">
+                        勾选子号后选择踢出时刻（北京时间，精确到分）
+                    </div>
+                </div>
+
                 <!-- 已加入成员 -->
                 <div class="content-section" style="margin-bottom: 1.5rem;">
                     <h4 style="margin-bottom: 1rem; color: var(--success);">已加入成员</h4>
-                    <div class="table-container" style="max-height: 250px; overflow-y: auto; margin: 0;">
+                    <div class="table-container" style="max-height: 250px; overflow: auto; margin: 0;">
                         <table class="data-table">
                             <thead>
                                 <tr>
+                                    <th style="width: 34px;">
+                                        <input type="checkbox" id="timedKickSelectAllJoined"
+                                            onchange="toggleTimedKickAll('joined', this.checked)">
+                                    </th>
                                     <th>邮箱</th>
-                                    <th style="width: 100px;">角色</th>
-                                    <th style="width: 110px;">席位</th>
-                                    <th style="width: 160px;">加入时间</th>
+                                    <th style="width: 90px;">角色</th>
+                                    <th style="width: 80px;">席位</th>
+                                    <th style="width: 175px;">到期（北京时间）</th>
+                                    <th style="width: 140px;">加入时间</th>
                                     <th style="text-align: right; width: 100px;">操作</th>
                                 </tr>
                             </thead>
@@ -889,14 +926,19 @@ eyJ..."></textarea>
                 <!-- 待加入成员 -->
                 <div class="content-section" style="margin: 0;">
                     <h4 style="margin-bottom: 1rem; color: var(--warning);">待加入成员 (邀请中)</h4>
-                    <div class="table-container" style="max-height: 250px; overflow-y: auto; margin: 0;">
+                    <div class="table-container" style="max-height: 250px; overflow: auto; margin: 0;">
                         <table class="data-table">
                             <thead>
                                 <tr>
+                                    <th style="width: 34px;">
+                                        <input type="checkbox" id="timedKickSelectAllInvited"
+                                            onchange="toggleTimedKickAll('invited', this.checked)">
+                                    </th>
                                     <th>邮箱</th>
-                                    <th style="width: 100px;">角色</th>
-                                    <th style="width: 110px;">席位</th>
-                                    <th style="width: 160px;">邀请时间</th>
+                                    <th style="width: 90px;">角色</th>
+                                    <th style="width: 80px;">席位</th>
+                                    <th style="width: 175px;">到期（北京时间）</th>
+                                    <th style="width: 140px;">邀请时间</th>
                                     <th style="text-align: right; width: 100px;">操作</th>
                                 </tr>
                             </thead>
@@ -909,6 +951,42 @@ eyJ..."></textarea>
             </div>
         </div>
     </div>
+    <!-- 定时踢人的日历弹层：挂在 body 下（而不是弹窗内），
+         否则会被 .content-section 的 transform 造成的堆叠上下文盖住 -->
+    <div class="kick-calendar" id="kickCalendar" role="dialog"
+        aria-label="选择踢出时间（北京时间）" hidden>
+        <div class="kick-cal-head">
+            <button type="button" class="kick-cal-nav" onclick="shiftKickMonth(-1)" aria-label="上个月">
+                <i data-lucide="chevron-left"></i>
+            </button>
+            <span class="kick-cal-title" id="kickCalTitle"></span>
+            <button type="button" class="kick-cal-nav" onclick="shiftKickMonth(1)" aria-label="下个月">
+                <i data-lucide="chevron-right"></i>
+            </button>
+        </div>
+        <div class="kick-cal-weekdays">
+            <span>一</span><span>二</span><span>三</span><span>四</span>
+            <span>五</span><span>六</span><span>日</span>
+        </div>
+        <div class="kick-cal-days" id="kickCalDays"></div>
+        <div class="kick-cal-time">
+            <span class="kick-cal-time-label">时间</span>
+            <select class="kick-cal-select" id="kickCalHour" aria-label="小时"></select>
+            <span class="kick-cal-colon">:</span>
+            <select class="kick-cal-select" id="kickCalMinute" aria-label="分钟"></select>
+        </div>
+        <div class="kick-cal-quick">
+            <button type="button" onclick="quickKickTime('today')">今天 23:59</button>
+            <button type="button" onclick="quickKickTime('tomorrow')">明天 12:00</button>
+        </div>
+        <div class="kick-cal-actions">
+            <button type="button" class="btn btn-secondary btn-sm"
+                onclick="closeKickCalendar()">取消</button>
+            <button type="button" class="btn btn-primary btn-sm"
+                onclick="confirmKickCalendar()">确定</button>
+        </div>
+    </div>
+
     <div id="toast" class="toast"></div>
 
     <script>window.SYSTEM_UI_THEME = {{ ui_theme|default("ocean")|tojson }};</script>

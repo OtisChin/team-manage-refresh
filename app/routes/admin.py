@@ -149,6 +149,33 @@ class AddMembersRequest(BaseModel):
     )
 
 
+class TimedKickSettingsRequest(BaseModel):
+    """定时踢人（按子号配置时长）设置请求"""
+    enabled: bool = Field(False, description="是否启用定时踢人")
+    interval_minutes: int = Field(1, ge=1, le=60, description="扫描间隔（分钟）")
+    grace_minutes: int = Field(
+        5,
+        ge=0,
+        le=1440,
+        description="到期后的宽限时长（分钟）；宽限结束才真正踢出",
+    )
+
+
+class MemberKickTimeRequest(BaseModel):
+    """为子号批量配置定时踢人时间"""
+    emails: List[str] = Field(..., description="子号邮箱列表")
+    kick_at: Optional[str] = Field(
+        None,
+        description="踢出时间（北京时间，精确到分，如 2026-09-17T22:38）；留空表示取消定时",
+    )
+    hours: Optional[int] = Field(
+        None,
+        ge=0,
+        le=8760,
+        description="兼容参数：多少小时后踢出；传 0 表示取消。优先使用 kick_at",
+    )
+
+
 class CodeGenerateRequest(BaseModel):
     """兑换码生成请求"""
     type: str = Field(..., description="生成类型: single 或 batch")
@@ -915,6 +942,52 @@ async def add_team_member(
                 "success": False,
                 "error": "添加成员失败，请稍后重试"
             }
+        )
+
+
+@router.post("/teams/{team_id}/members/kick-time")
+async def set_member_kick_time(
+    team_id: int,
+    payload: MemberKickTimeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin)
+):
+    """为子号批量配置定时踢人时间（北京时间，精确到分）。"""
+    try:
+        try:
+            parsed_kick_at = team_service.parse_kick_at(payload.kick_at)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "error_code": "invalid_kick_at",
+                    "error": str(exc),
+                },
+            )
+
+        logger.info(
+            f"管理员配置定时踢人: Team={team_id}, kick_at={payload.kick_at}, "
+            f"hours={payload.hours}, emails={payload.emails}"
+        )
+        result = await team_service.set_member_kick_time(
+            team_id=team_id,
+            emails=payload.emails,
+            hours=payload.hours,
+            db_session=db,
+            kick_at=parsed_kick_at,
+        )
+        if not result.get("success"):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content=result,
+            )
+        return JSONResponse(content=result)
+    except Exception:
+        logger.exception("配置定时踢人失败")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"success": False, "error": "配置定时踢人失败，请稍后重试"},
         )
 
 
@@ -2272,6 +2345,11 @@ async def settings_page(
             "auto_kick_admin_invited_enabled": await settings_service.get_setting(db, "auto_kick_admin_invited_enabled", "false"),
             "auto_kick_admin_invited_enabled_since": await settings_service.get_setting(db, "auto_kick_admin_invited_enabled_since", ""),
             "auto_kick_admin_invited_period_days": await settings_service.get_setting(db, "auto_kick_admin_invited_period_days", "30"),
+            "kick_interval_min_seconds": await settings_service.get_setting(db, "kick_interval_min_seconds", "10"),
+            "kick_interval_max_seconds": await settings_service.get_setting(db, "kick_interval_max_seconds", "20"),
+            "timed_kick_enabled": await settings_service.get_setting(db, "timed_kick_enabled", "false"),
+            "timed_kick_interval_minutes": await settings_service.get_setting(db, "timed_kick_interval_minutes", "1"),
+            "timed_kick_grace_minutes": await settings_service.get_setting(db, "timed_kick_grace_minutes", "5"),
             "default_team_max_members": await settings_service.get_setting(db, "default_team_max_members", "6"),
             "cliproxyapi_base_url": await settings_service.get_setting(db, "cliproxyapi_base_url", ""),
             "cliproxyapi_api_key": await settings_service.get_setting(db, "cliproxyapi_api_key", ""),
@@ -2341,6 +2419,14 @@ class WarrantyAutoKickSettingsRequest(BaseModel):
     enabled: bool = Field(False, description="是否启用兑换码过期自动踢人")
     interval_hours: int = Field(12, ge=1, le=168, description="检查间隔（小时）")
     renewal_reminder_days: int = Field(7, ge=1, le=30, description="距离质保结束多少天内提醒续期")
+    kick_interval_min_seconds: float = Field(
+        10, ge=0, le=600,
+        description="批量踢人时两次操作之间的最小随机间隔（秒）；0 表示不等待",
+    )
+    kick_interval_max_seconds: float = Field(
+        20, ge=0, le=600,
+        description="批量踢人时两次操作之间的最大随机间隔（秒）；0 表示不等待",
+    )
     usage_period_days: int = Field(
         30,
         ge=1,
@@ -3105,6 +3191,12 @@ async def update_warranty_auto_kick_settings(
         prev_admin_inv = str(prev_admin_inv_raw).strip().lower() in ("1", "true", "yes", "on")
         new_admin_inv = bool(auto_kick_data.admin_invited_enabled)
 
+        # 批量踢人间隔：允许 0（不等待），但最小值不能大于最大值
+        kick_min_seconds = float(auto_kick_data.kick_interval_min_seconds or 0)
+        kick_max_seconds = float(auto_kick_data.kick_interval_max_seconds or 0)
+        if kick_max_seconds and kick_max_seconds < kick_min_seconds:
+            kick_min_seconds, kick_max_seconds = kick_max_seconds, kick_min_seconds
+
         settings_to_save = {
             "warranty_auto_kick_enabled": str(auto_kick_data.enabled).lower(),
             "warranty_auto_kick_interval_hours": str(auto_kick_data.interval_hours),
@@ -3113,6 +3205,8 @@ async def update_warranty_auto_kick_settings(
             "auto_kick_unauthorized_enabled": str(new_unauth).lower(),
             "auto_kick_admin_invited_enabled": str(new_admin_inv).lower(),
             "auto_kick_admin_invited_period_days": str(auto_kick_data.admin_invited_period_days),
+            "kick_interval_min_seconds": str(kick_min_seconds),
+            "kick_interval_max_seconds": str(kick_max_seconds),
         }
 
         # 关→开：写入新的启用时间戳；其它情形（保持开 / 保持关 / 开→关）不动 since。
@@ -3191,6 +3285,57 @@ async def update_warranty_auto_kick_settings(
         )
     except Exception:
         logger.exception("更新质保过期自动踢人设置失败")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"success": False, "error": "更新失败，请稍后重试"}
+        )
+
+
+@router.post("/settings/timed-kick")
+async def update_timed_kick_settings(
+    timed_kick_data: TimedKickSettingsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin)
+):
+    """更新定时踢人（按子号配置时长）设置。"""
+    try:
+        logger.info(
+            "管理员更新定时踢人配置: enabled=%s, interval_minutes=%s, grace_minutes=%s",
+            timed_kick_data.enabled,
+            timed_kick_data.interval_minutes,
+            timed_kick_data.grace_minutes,
+        )
+
+        await settings_service.update_settings(db, {
+            "timed_kick_enabled": str(timed_kick_data.enabled).lower(),
+            "timed_kick_interval_minutes": str(timed_kick_data.interval_minutes),
+            "timed_kick_grace_minutes": str(timed_kick_data.grace_minutes),
+        })
+
+        from app.main import configure_timed_member_kick_job
+
+        applied_interval = configure_timed_member_kick_job(
+            timed_kick_data.enabled,
+            timed_kick_data.interval_minutes,
+        )
+
+        if timed_kick_data.enabled:
+            message = (
+                f"定时踢人已启用（每 {applied_interval} 分钟扫描一次，"
+                f"到期后宽限 {timed_kick_data.grace_minutes} 分钟执行）"
+            )
+        else:
+            message = "定时踢人已关闭"
+
+        return JSONResponse(content={
+            "success": True,
+            "message": message,
+            "enabled": timed_kick_data.enabled,
+            "interval_minutes": applied_interval,
+            "grace_minutes": timed_kick_data.grace_minutes,
+        })
+    except Exception:
+        logger.exception("更新定时踢人设置失败")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"success": False, "error": "更新失败，请稍后重试"}

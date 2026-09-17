@@ -109,6 +109,31 @@ async def create_default_settings():
                 value="30",
                 description="后台邀请成员的使用期限（天）；超过该期限的后台邀请会被自动踢人扫描清退"
             ),
+            Setting(
+                key="timed_kick_enabled",
+                value="false",
+                description="是否启用定时踢人（按子号单独配置可用时长）"
+            ),
+            Setting(
+                key="timed_kick_interval_minutes",
+                value="1",
+                description="定时踢人的扫描间隔（分钟）"
+            ),
+            Setting(
+                key="timed_kick_grace_minutes",
+                value="5",
+                description="定时踢人的到期宽限时长（分钟）；宽限结束才真正踢出"
+            ),
+            Setting(
+                key="kick_interval_min_seconds",
+                value="10",
+                description="批量踢人时两次操作之间的最小随机间隔（秒）"
+            ),
+            Setting(
+                key="kick_interval_max_seconds",
+                value="20",
+                description="批量踢人时两次操作之间的最大随机间隔（秒）"
+            ),
         ]
 
         session.add_all(default_settings)

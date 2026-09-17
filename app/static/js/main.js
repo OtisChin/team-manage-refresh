@@ -677,17 +677,29 @@ function mountGlobalOverlayNodes() {
 }
 
 // 日期格式化函数
+// 后台统一按北京时间渲染（运营时区），避免浏览器时区不同导致同一时刻显示不一致
+const BEIJING_TIME_ZONE = 'Asia/Shanghai';
+
+function toBeijingDateTime(date) {
+    // sv-SE 的格式恰好是 YYYY-MM-DD HH:mm
+    return new Intl.DateTimeFormat('sv-SE', {
+        timeZone: BEIJING_TIME_ZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+    }).format(date);
+}
+
 function formatDateTime(dateString) {
     if (!dateString) return '-';
 
     const date = new Date(dateString);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
+    if (isNaN(date.getTime())) return '-';
 
-    return `${year}-${month}-${day} ${hours}:${minutes}`;
+    return toBeijingDateTime(date);
 }
 
 // 登出函数
@@ -1901,12 +1913,435 @@ function seatTypeBadge(seatType) {
     return '<span class="text-muted">-</span>';
 }
 
+function kickTimeCell(member) {
+    if (!member.kick_at) {
+        return '<span class="text-muted">不限时</span>';
+    }
+    const label = formatDateTime(member.kick_at);
+    const kickAt = new Date(member.kick_at);
+    if (!isNaN(kickAt.getTime()) && kickAt.getTime() <= Date.now()) {
+        return `<span class="seat-detail">${label}</span> `
+            + '<span class="seat-chip seat-chip-pending" title="已到点，等待宽限结束后由后台踢出">待踢出</span>';
+    }
+    return `<span class="seat-detail">${label}</span>`;
+}
+
+function timedKickCheckbox(member, teamId) {
+    if (member.role === 'account-owner') {
+        return '<span class="text-muted" title="车主不可配置">-</span>';
+    }
+    return `<input type="checkbox" class="timed-kick-checkbox" data-status="${member.status}"
+        value="${escapeHtml(member.email)}"
+        onchange="updateTimedKickSelectedCount()">`;
+}
+
+function collectTimedKickSelection() {
+    return Array.from(document.querySelectorAll('.timed-kick-checkbox:checked'))
+        .map(box => box.value);
+}
+
+function updateTimedKickSelectedCount() {
+    const boxes = Array.from(document.querySelectorAll('.timed-kick-checkbox'));
+
+    // 勾选的行整体高亮，长表格里也能看清选中范围
+    boxes.forEach(box => {
+        const row = box.closest('tr');
+        if (row) row.classList.toggle('member-row-selected', box.checked);
+    });
+
+    const checked = boxes.filter(box => box.checked).length;
+    const counter = document.getElementById('timedKickSelectedCount');
+    if (counter) counter.textContent = String(checked);
+
+    const badge = document.getElementById('timedKickCountBadge');
+    if (badge) badge.classList.toggle('is-active', checked > 0);
+}
+
+// 选完时间给一行预览，并即时拦掉已过去的时刻
+function updateTimedKickPreview() {
+    const preview = document.getElementById('timedKickPreview');
+    const input = document.getElementById('timedKickAt');
+    if (!preview) return;
+
+    const value = input ? input.value : '';
+    if (!value) {
+        preview.className = 'kick-time-preview';
+        preview.textContent = '勾选子号后选择踢出时刻（北京时间，精确到分）';
+        return;
+    }
+
+    // 输入框里的值本身就是"北京时间的墙钟时间"，直接和当前北京时间做字典序比较，
+    // 这样不依赖浏览器所在时区
+    const pickedWall = value.replace('T', ' ').slice(0, 16);
+    const nowWall = toBeijingDateTime(new Date());
+
+    if (pickedWall <= nowWall) {
+        preview.className = 'kick-time-preview is-invalid';
+        preview.textContent = `所选时刻 ${pickedWall} 已经过去，请重新选择`;
+        return;
+    }
+
+    preview.className = 'kick-time-preview is-ready';
+    preview.textContent =
+        `将于 ${pickedWall}（北京时间）踢出；到点后宽限若干分钟再由后台执行，只移除成员、保留兑换码`;
+}
+
+function toggleTimedKickAll(status, checked) {
+    document.querySelectorAll(`.timed-kick-checkbox[data-status="${status}"]`)
+        .forEach(box => { box.checked = checked; });
+    updateTimedKickSelectedCount();
+}
+
+// ===== 定时踢人：自绘日历（原生 datetime-local 的面板无法套用后台的卡通风格）=====
+
+const kickCalState = {
+    viewYear: 0,
+    viewMonth: 0,
+    selected: null
+};
+
+function pad2(value) {
+    return String(value).padStart(2, '0');
+}
+
+// 北京时间「墙钟时间」的各个字段，不经过 Date 的时区转换
+function beijingNowParts() {
+    const m = toBeijingDateTime(new Date()).match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/);
+    return {
+        year: Number(m[1]), month: Number(m[2]), day: Number(m[3]),
+        hour: Number(m[4]), minute: Number(m[5])
+    };
+}
+
+function kickValueFromParts(parts) {
+    return `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}`
+        + `T${pad2(parts.hour)}:${pad2(parts.minute)}`;
+}
+
+function parseKickValue(value) {
+    if (!value) return null;
+    const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+    if (!m) return null;
+    return {
+        year: Number(m[1]), month: Number(m[2]), day: Number(m[3]),
+        hour: Number(m[4]), minute: Number(m[5])
+    };
+}
+
+// 用 UTC 运算做"北京时间墙钟"的日期加减，避免浏览器时区干扰
+function kickPartsAddDays(parts, days) {
+    const d = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+    d.setUTCDate(d.getUTCDate() + days);
+    return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
+
+function kickPartsAddHours(parts, hours) {
+    const d = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute));
+    d.setUTCHours(d.getUTCHours() + hours);
+    return {
+        year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(),
+        hour: d.getUTCHours(), minute: d.getUTCMinutes()
+    };
+}
+
+function kickDaysInMonth(year, month) {
+    return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+// 周一作为一周第一天
+function kickFirstWeekdayOffset(year, month) {
+    const weekday = new Date(Date.UTC(year, month - 1, 1)).getUTCDay(); // 0=周日
+    return (weekday + 6) % 7;
+}
+
+function defaultKickParts() {
+    return kickPartsAddHours({ ...beijingNowParts(), minute: 0 }, 4);
+}
+
+function defaultTimedKickAtValue() {
+    return kickValueFromParts(defaultKickParts());
+}
+
+function renderKickCalendar() {
+    const title = document.getElementById('kickCalTitle');
+    const daysBox = document.getElementById('kickCalDays');
+    if (!title || !daysBox) return;
+
+    title.textContent = `${kickCalState.viewYear} 年 ${kickCalState.viewMonth} 月`;
+
+    const now = beijingNowParts();
+    const selected = kickCalState.selected;
+    const offset = kickFirstWeekdayOffset(kickCalState.viewYear, kickCalState.viewMonth);
+    const total = kickDaysInMonth(kickCalState.viewYear, kickCalState.viewMonth);
+
+    let html = '';
+    for (let i = 0; i < offset; i += 1) {
+        html += '<span class="kick-cal-day is-empty"></span>';
+    }
+    for (let day = 1; day <= total; day += 1) {
+        const classes = ['kick-cal-day'];
+        if (selected
+            && selected.year === kickCalState.viewYear
+            && selected.month === kickCalState.viewMonth
+            && selected.day === day) {
+            classes.push('is-selected');
+        }
+        if (now.year === kickCalState.viewYear
+            && now.month === kickCalState.viewMonth
+            && now.day === day) {
+            classes.push('is-today');
+        }
+        html += `<button type="button" class="${classes.join(' ')}" onclick="pickKickDay(${day})">${day}</button>`;
+    }
+    daysBox.innerHTML = html;
+
+    const hourSelect = document.getElementById('kickCalHour');
+    const minuteSelect = document.getElementById('kickCalMinute');
+    if (hourSelect && hourSelect.options.length === 0) {
+        for (let hour = 0; hour < 24; hour += 1) {
+            hourSelect.add(new Option(pad2(hour), String(hour)));
+        }
+    }
+    if (minuteSelect && minuteSelect.options.length === 0) {
+        for (let minute = 0; minute < 60; minute += 1) {
+            minuteSelect.add(new Option(pad2(minute), String(minute)));
+        }
+    }
+    if (selected) {
+        if (hourSelect) hourSelect.value = String(selected.hour);
+        if (minuteSelect) minuteSelect.value = String(selected.minute);
+    }
+}
+
+function readKickCalendarTime() {
+    if (!kickCalState.selected) return;
+    const hourSelect = document.getElementById('kickCalHour');
+    const minuteSelect = document.getElementById('kickCalMinute');
+    if (hourSelect) kickCalState.selected.hour = Number(hourSelect.value) || 0;
+    if (minuteSelect) kickCalState.selected.minute = Number(minuteSelect.value) || 0;
+}
+
+function toggleKickCalendar() {
+    const calendar = document.getElementById('kickCalendar');
+    if (!calendar) return;
+    if (calendar.hidden) {
+        openKickCalendar();
+    } else {
+        closeKickCalendar();
+    }
+}
+
+function openKickCalendar() {
+    const picker = document.getElementById('kickTimePicker');
+    const calendar = document.getElementById('kickCalendar');
+    const trigger = document.getElementById('kickTimeTrigger');
+    if (!picker || !calendar) return;
+
+    const hidden = document.getElementById('timedKickAt');
+    const selected = parseKickValue(hidden ? hidden.value : '') || defaultKickParts();
+    kickCalState.selected = selected;
+    kickCalState.viewYear = selected.year;
+    kickCalState.viewMonth = selected.month;
+
+    renderKickCalendar();
+    calendar.hidden = false;
+    positionKickCalendar();
+    picker.classList.add('is-open');
+    if (trigger) trigger.setAttribute('aria-expanded', 'true');
+}
+
+// 日历是 fixed 定位、挂在 body 下，所以要自己算位置：
+// 默认贴在触发按钮下方，放不下就翻到上方，并保证不超出视口
+function positionKickCalendar() {
+    const trigger = document.getElementById('kickTimeTrigger');
+    const calendar = document.getElementById('kickCalendar');
+    if (!trigger || !calendar || calendar.hidden) return;
+
+    const anchor = trigger.getBoundingClientRect();
+    const margin = 10;
+    const viewportPadding = 12;
+
+    calendar.style.visibility = 'hidden';
+    const size = calendar.getBoundingClientRect();
+
+    let top = anchor.bottom + margin;
+    if (top + size.height > window.innerHeight - viewportPadding) {
+        const above = anchor.top - margin - size.height;
+        top = above >= viewportPadding
+            ? above
+            : Math.max(viewportPadding, window.innerHeight - viewportPadding - size.height);
+    }
+
+    let left = anchor.left;
+    if (left + size.width > window.innerWidth - viewportPadding) {
+        left = Math.max(viewportPadding, window.innerWidth - viewportPadding - size.width);
+    }
+
+    calendar.style.top = `${Math.round(top)}px`;
+    calendar.style.left = `${Math.round(left)}px`;
+    calendar.style.visibility = '';
+}
+
+function closeKickCalendar() {
+    const picker = document.getElementById('kickTimePicker');
+    const calendar = document.getElementById('kickCalendar');
+    const trigger = document.getElementById('kickTimeTrigger');
+    if (calendar) calendar.hidden = true;
+    if (picker) picker.classList.remove('is-open');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+}
+
+function shiftKickMonth(delta) {
+    let month = kickCalState.viewMonth + delta;
+    let year = kickCalState.viewYear;
+    if (month < 1) { month = 12; year -= 1; }
+    if (month > 12) { month = 1; year += 1; }
+    kickCalState.viewYear = year;
+    kickCalState.viewMonth = month;
+    renderKickCalendar();
+}
+
+function pickKickDay(day) {
+    const base = kickCalState.selected || defaultKickParts();
+    readKickCalendarTime();
+    kickCalState.selected = {
+        ...base,
+        year: kickCalState.viewYear,
+        month: kickCalState.viewMonth,
+        day
+    };
+    renderKickCalendar();
+}
+
+function quickKickTime(kind) {
+    const now = beijingNowParts();
+    const target = kind === 'tomorrow'
+        ? { ...kickPartsAddDays(now, 1), hour: 12, minute: 0 }
+        : { ...now, hour: 23, minute: 59 };
+
+    kickCalState.selected = target;
+    kickCalState.viewYear = target.year;
+    kickCalState.viewMonth = target.month;
+    renderKickCalendar();
+}
+
+// 把选中的时刻写回隐藏字段与展示文本
+function setTimedKickValue(value) {
+    const hidden = document.getElementById('timedKickAt');
+    const display = document.getElementById('timedKickAtDisplay');
+    const parts = parseKickValue(value);
+
+    if (hidden) hidden.value = parts ? value : '';
+    if (display) {
+        display.textContent = parts
+            ? `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)} ${pad2(parts.hour)}:${pad2(parts.minute)}`
+            : '选择踢出时间';
+        display.classList.toggle('is-placeholder', !parts);
+    }
+    updateTimedKickPreview();
+}
+
+function confirmKickCalendar() {
+    readKickCalendarTime();
+    if (kickCalState.selected) {
+        setTimedKickValue(kickValueFromParts(kickCalState.selected));
+    }
+    closeKickCalendar();
+}
+
+// 点击外部 / Esc 关闭
+document.addEventListener('click', (event) => {
+    const calendar = document.getElementById('kickCalendar');
+    const picker = document.getElementById('kickTimePicker');
+    if (!calendar || calendar.hidden) return;
+
+    // 点日期会重渲染整个日期网格，event.target 随即被移出 DOM，
+    // 这时 calendar.contains(event.target) 会是 false 而误判成"点了外部"。
+    // composedPath() 在派发时就固定了祖先链，用它判断才可靠。
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    if (path.includes(calendar) || (picker && path.includes(picker))) return;
+
+    closeKickCalendar();
+});
+
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeKickCalendar();
+});
+
+// 弹窗内容滚动或窗口尺寸变化时，日历跟着触发按钮走
+window.addEventListener('resize', positionKickCalendar);
+document.addEventListener('scroll', positionKickCalendar, true);
+
+function resetTimedKickControls() {
+    document.querySelectorAll('.timed-kick-checkbox').forEach(box => { box.checked = false; });
+    const allJoined = document.getElementById('timedKickSelectAllJoined');
+    const allInvited = document.getElementById('timedKickSelectAllInvited');
+    if (allJoined) allJoined.checked = false;
+    if (allInvited) allInvited.checked = false;
+    closeKickCalendar();
+    setTimedKickValue(defaultTimedKickAtValue());
+    updateTimedKickSelectedCount();
+}
+
+async function applyTimedKick(cancel) {
+    const teamId = window.currentTeamId;
+    const emails = collectTimedKickSelection();
+
+    if (!teamId) {
+        showToast('无法获取 Team ID', 'error');
+        return;
+    }
+    if (!emails.length) {
+        showToast('请先勾选要配置的子号', 'error');
+        return;
+    }
+
+    let kickAt = null;
+    if (!cancel) {
+        const atInput = document.getElementById('timedKickAt');
+        kickAt = atInput ? atInput.value : '';
+        if (!kickAt) {
+            showToast('请选择踢出时间（北京时间）', 'error');
+            return;
+        }
+    }
+
+    const submitBtn = document.getElementById('timedKickApplyBtn');
+    const originalText = submitBtn ? submitBtn.innerHTML : '';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '处理中...';
+    }
+
+    try {
+        const result = await apiCall(`/admin/teams/${teamId}/members/kick-time`, {
+            method: 'POST',
+            body: JSON.stringify({ emails, kick_at: kickAt })
+        });
+
+        if (result.success) {
+            const data = result.data || {};
+            showToast(data.message || (cancel ? '已取消定时踢人' : '踢出时间已设置'), 'success');
+            await loadModalMemberList(teamId);
+        } else {
+            showToast(getFriendlyAdminErrorMessage(result.error || '配置失败', 0, 'member'), 'error');
+        }
+    } catch (error) {
+        showToast('网络错误', 'error');
+    } finally {
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalText;
+        }
+    }
+}
+
 async function loadModalMemberList(teamId) {
     const joinedTableBody = document.getElementById('modalJoinedMembersTableBody');
     const invitedTableBody = document.getElementById('modalInvitedMembersTableBody');
 
-    if (joinedTableBody) joinedTableBody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 2rem;">加载中...</td></tr>';
-    if (invitedTableBody) invitedTableBody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 2rem;">加载中...</td></tr>';
+    if (joinedTableBody) joinedTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 2rem;">加载中...</td></tr>';
+    if (invitedTableBody) invitedTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 2rem;">加载中...</td></tr>';
 
     try {
         const result = await apiCall(`/admin/teams/${teamId}/members/list`);
@@ -1918,10 +2353,11 @@ async function loadModalMemberList(teamId) {
             // 渲染已加入成员
             if (joinedTableBody) {
                 if (joinedMembers.length === 0) {
-                    joinedTableBody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">暂无已加入成员</td></tr>';
+                    joinedTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">暂无已加入成员</td></tr>';
                 } else {
                     joinedTableBody.innerHTML = joinedMembers.map(m => `
                         <tr>
+                            <td>${timedKickCheckbox(m, teamId)}</td>
                             <td>${escapeHtml(m.email)}</td>
                             <td>
                                 <span class="role-badge role-${m.role === 'account-owner' ? 'account-owner' : 'member'}">
@@ -1929,6 +2365,7 @@ async function loadModalMemberList(teamId) {
                                 </span>
                             </td>
                             <td>${seatTypeBadge(m.seat_type)}</td>
+                            <td>${kickTimeCell(m)}</td>
                             <td>${formatDateTime(m.added_at)}</td>
                             <td style="text-align: right;">
                                 ${m.role !== 'account-owner' ? `
@@ -1945,15 +2382,17 @@ async function loadModalMemberList(teamId) {
             // 渲染待加入成员
             if (invitedTableBody) {
                 if (invitedMembers.length === 0) {
-                    invitedTableBody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">暂无待加入成员</td></tr>';
+                    invitedTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">暂无待加入成员</td></tr>';
                 } else {
                     invitedTableBody.innerHTML = invitedMembers.map(m => `
                         <tr>
+                            <td>${timedKickCheckbox(m, teamId)}</td>
                             <td>${escapeHtml(m.email)}</td>
                             <td>
                                 <span class="role-badge role-member">成员</span>
                             </td>
                             <td>${seatTypeBadge(m.seat_type)}</td>
+                            <td>${kickTimeCell(m)}</td>
                             <td>${formatDateTime(m.added_at)}</td>
                             <td style="text-align: right;">
                                 <button onclick='revokeInvite(${JSON.stringify(teamId)}, ${JSON.stringify(m.email)}, true)' class="btn btn-sm btn-warning">
@@ -1965,10 +2404,11 @@ async function loadModalMemberList(teamId) {
                 }
             }
 
+            resetTimedKickControls();
             if (window.lucide) lucide.createIcons();
         } else {
             const friendlyError = getFriendlyAdminErrorMessage(result.error || '加载失败', 0, 'member');
-            const errorMsg = `<tr><td colspan="5" style="text-align: center; color: var(--danger);">${escapeHtml(friendlyError)}</td></tr>`;
+            const errorMsg = `<tr><td colspan="7" style="text-align: center; color: var(--danger);">${escapeHtml(friendlyError)}</td></tr>`;
             if (joinedTableBody) joinedTableBody.innerHTML = errorMsg;
             if (invitedTableBody) invitedTableBody.innerHTML = errorMsg;
         }

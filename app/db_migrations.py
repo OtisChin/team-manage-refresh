@@ -215,6 +215,18 @@ def run_auto_migration():
             """)
             migrations_applied.append("team_email_mappings.is_admin_invited")
 
+        # 定时踢人：每个子号单独配置的到期时间
+        for kick_column, kick_type in (
+            ("kick_at", "DATETIME"),
+            ("kick_hours", "INTEGER"),
+        ):
+            if table_exists(cursor, "team_email_mappings") and not column_exists(cursor, "team_email_mappings", kick_column):
+                logger.info(f"添加 team_email_mappings.{kick_column} 字段")
+                cursor.execute(
+                    f"ALTER TABLE team_email_mappings ADD COLUMN {kick_column} {kick_type}"
+                )
+                migrations_applied.append(f"team_email_mappings.{kick_column}")
+
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_team_email_unique
             ON team_email_mappings (team_id, email)

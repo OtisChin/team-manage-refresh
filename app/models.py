@@ -99,6 +99,9 @@ class TeamEmailMapping(Base):
     )
     last_seen_at = Column(DateTime, default=get_now, comment="最后一次确认该状态的时间")
     missing_sync_count = Column(Integer, default=0, nullable=False, comment="连续同步缺失次数")
+    # 定时踢人：每个子号单独配置可用时长，到期（+宽限）后自动踢出
+    kick_at = Column(DateTime, comment="定时踢人到期时间（配置时刻 + kick_hours）；NULL 表示不限时")
+    kick_hours = Column(Integer, comment="配置的时长（小时），仅用于展示；NULL 表示未配置")
     created_at = Column(DateTime, default=get_now, comment="创建时间")
     updated_at = Column(DateTime, default=get_now, onupdate=get_now, comment="更新时间")
 

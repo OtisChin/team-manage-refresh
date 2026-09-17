@@ -261,8 +261,67 @@
             <p class="form-help">从"邀请发出时刻"起算，超过该期限的后台邀请会被自动踢人扫描清退。需要继续使用请重新邀请。</p>
         </div>
 
+        <hr style="margin: 16px 0; border: none; border-top: 1px solid var(--border-color, #e5e7eb);">
+
+        <div class="form-group">
+            <label>批量踢出间隔 (秒)</label>
+            <div style="display: flex; gap: 0.75rem; align-items: center;">
+                <input type="number" id="kickIntervalMinSeconds" name="kick_interval_min_seconds"
+                    value="{{ kick_interval_min_seconds or '10' }}" min="0" max="600" step="1"
+                    class="form-control" style="width: 140px;">
+                <span class="text-muted">~</span>
+                <input type="number" id="kickIntervalMaxSeconds" name="kick_interval_max_seconds"
+                    value="{{ kick_interval_max_seconds or '20' }}" min="0" max="600" step="1"
+                    class="form-control" style="width: 140px;">
+            </div>
+            <p class="form-help">
+                批量踢人时，每处理完一个账号后随机等待这个区间内的秒数再处理下一个，用于分散请求节奏、降低被风控的概率。
+                默认 10~20 秒。<strong>两个都填 0 表示不等待</strong>（一次性踢完，适合账号很少的场景）。
+                对「过期兑换码」「非授权成员」「后台邀请过期」「定时踢人」四种批量踢出都生效。
+            </p>
+        </div>
+
         <p class="form-help">该操作不可恢复，开启前请确认售后流程允许自动清退成员并销毁兑换码。</p>
         <button type="submit" class="btn btn-primary">保存自动踢人配置</button>
+    </form>
+</div>
+
+
+<!-- 定时踢人（按子号配置时长） -->
+<div class="content-section settings-panel" id="settings-timed-kick">
+    <div class="section-header">
+        <h3>定时踢人</h3>
+    </div>
+
+    <form id="timedKickForm" class="settings-form">
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="timedKickEnabled" name="enabled" {% if (timed_kick_enabled or 'false')|lower in ['1','true','yes','on'] %}checked{% endif %}>
+                <span>启用定时踢人（按子号单独配置可用时长）</span>
+            </label>
+            <p class="form-help">
+                在「成员管理」弹窗里给子号配置时长（2h / 4h / 5h / 自定义，可批量勾选），
+                <strong>从配置那一刻起算</strong>；到期后再宽限下方时长，然后自动踢出。
+                只移除成员，<strong>不销毁兑换码与兑换记录</strong>；车主账号不可配置。
+            </p>
+        </div>
+
+        <div class="form-group">
+            <label for="timedKickGraceMinutes">到期宽限 (分钟)</label>
+            <input type="number" id="timedKickGraceMinutes" name="grace_minutes"
+                value="{{ timed_kick_grace_minutes or '5' }}" min="0" max="1440" class="form-control">
+            <p class="form-help">到期后先等这么久再踢出，给用户留缓冲。默认 5 分钟；填 0 表示到点立即踢。</p>
+        </div>
+
+        <div class="form-group">
+            <label for="timedKickIntervalMinutes">扫描间隔 (分钟)</label>
+            <input type="number" id="timedKickIntervalMinutes" name="interval_minutes"
+                value="{{ timed_kick_interval_minutes or '1' }}" min="1" max="60" class="form-control">
+            <p class="form-help">建议 1~5 分钟。间隔越大，实际踢出时间与到期时间的偏差越大。</p>
+        </div>
+
+        <p class="form-help">该操作会移除成员但其兑换码保留，可重新邀请；开启即立即执行一轮扫描。</p>
+        <button type="submit" class="btn btn-primary">保存定时踢人配置</button>
     </form>
 </div>
 
@@ -694,6 +753,18 @@
         const adminInvitedToggle = document.getElementById('autoKickAdminInvitedEnabled');
         const admin_invited_enabled = !!(adminInvitedToggle && adminInvitedToggle.checked);
         const admin_invited_period_days = parseInt(document.getElementById('autoKickAdminInvitedPeriodDays').value);
+        const kick_interval_min_seconds = parseFloat(document.getElementById('kickIntervalMinSeconds').value);
+        const kick_interval_max_seconds = parseFloat(document.getElementById('kickIntervalMaxSeconds').value);
+
+        if (isNaN(kick_interval_min_seconds) || kick_interval_min_seconds < 0 || kick_interval_min_seconds > 600) {
+            showToast('批量踢出最小间隔必须在 0~600 秒之间', 'error');
+            return;
+        }
+
+        if (isNaN(kick_interval_max_seconds) || kick_interval_max_seconds < 0 || kick_interval_max_seconds > 600) {
+            showToast('批量踢出最大间隔必须在 0~600 秒之间', 'error');
+            return;
+        }
 
         if (isNaN(interval_hours) || interval_hours < 1 || interval_hours > 168) {
             showToast('检查间隔必须在 1~168 小时之间', 'error');
@@ -721,13 +792,52 @@
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ enabled, interval_hours, renewal_reminder_days, usage_period_days, unauthorized_enabled, admin_invited_enabled, admin_invited_period_days })
+                body: JSON.stringify({ enabled, interval_hours, renewal_reminder_days, usage_period_days, unauthorized_enabled, admin_invited_enabled, admin_invited_period_days, kick_interval_min_seconds, kick_interval_max_seconds })
             });
 
             const data = await response.json();
 
             if (response.ok && data.success) {
                 showToast(data.message || '自动踢人配置已保存', 'success');
+            } else {
+                showToast(data.error || '保存失败', 'error');
+            }
+        } catch (error) {
+            showToast('网络错误', 'error');
+        }
+    });
+
+    // 定时踢人表单
+    document.getElementById('timedKickForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const enabled = document.getElementById('timedKickEnabled').checked;
+        const grace_minutes = parseInt(document.getElementById('timedKickGraceMinutes').value);
+        const interval_minutes = parseInt(document.getElementById('timedKickIntervalMinutes').value);
+
+        if (isNaN(grace_minutes) || grace_minutes < 0 || grace_minutes > 1440) {
+            showToast('到期宽限必须在 0~1440 分钟之间', 'error');
+            return;
+        }
+
+        if (isNaN(interval_minutes) || interval_minutes < 1 || interval_minutes > 60) {
+            showToast('扫描间隔必须在 1~60 分钟之间', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('/admin/settings/timed-kick', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ enabled, interval_minutes, grace_minutes })
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                showToast(data.message || '定时踢人配置已保存', 'success');
             } else {
                 showToast(data.error || '保存失败', 'error');
             }

@@ -4,6 +4,7 @@
 """
 import logging
 import asyncio
+import random
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from sqlalchemy import select, and_, or_, delete, update, func
@@ -22,6 +23,20 @@ from app.utils.time_utils import get_now
 DEFAULT_AUTO_KICK_USAGE_PERIOD_DAYS = 30
 MIN_AUTO_KICK_USAGE_PERIOD_DAYS = 1
 MAX_AUTO_KICK_USAGE_PERIOD_DAYS = 3650
+
+# 定时踢人（按子号配置的可用时长）相关默认值
+DEFAULT_TIMED_KICK_GRACE_MINUTES = 5
+MIN_TIMED_KICK_GRACE_MINUTES = 0
+MAX_TIMED_KICK_GRACE_MINUTES = 24 * 60
+TIMED_KICK_SOURCE = "auto_kick_timed"
+
+# 批量踢人时，两次操作之间的随机等待范围（秒）。
+# 目的是把连续请求分散开，避免短时间内对同一工作区高频调用被风控。
+DEFAULT_KICK_INTERVAL_MIN_SECONDS = 10
+DEFAULT_KICK_INTERVAL_MAX_SECONDS = 20
+MAX_KICK_INTERVAL_SECONDS = 600
+KICK_INTERVAL_SETTING_MIN = "kick_interval_min_seconds"
+KICK_INTERVAL_SETTING_MAX = "kick_interval_max_seconds"
 
 logger = logging.getLogger(__name__)
 
@@ -1140,7 +1155,9 @@ class WarrantyService:
         failed = 0
         dismissed_renewal_requests = 0
 
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                await self._sleep_between_kicks(db_session)
             item_result = await self.kick_and_destroy_expired_warranty_code(db_session, candidate.get("code", ""))
             results.append(item_result)
             category = item_result.get("category")
@@ -1448,7 +1465,9 @@ class WarrantyService:
         skipped = 0
         failed = 0
 
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                await self._sleep_between_kicks(db_session)
             item_result = await self.kick_unauthorized_team_member(
                 db_session,
                 candidate.get("team_id"),
@@ -1746,7 +1765,9 @@ class WarrantyService:
         skipped = 0
         failed = 0
 
-        for candidate in candidates:
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                await self._sleep_between_kicks(db_session)
             item_result = await self.kick_admin_invited_expired_member(
                 db_session,
                 candidate.get("team_id"),
@@ -1772,6 +1793,326 @@ class WarrantyService:
             "failed": failed,
             "results": results,
             "error": None if failed == 0 else "部分后台邀请过期成员处理失败",
+        }
+
+    # ------------------------------------------------------------------
+    # 定时踢人：每个子号单独配置可用时长，到期后再宽限若干分钟自动踢出
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_timed_kick_grace_minutes(value: Any) -> int:
+        """规范化宽限时长（分钟）。"""
+        try:
+            minutes = int(str(value).strip())
+        except (TypeError, ValueError, AttributeError):
+            minutes = DEFAULT_TIMED_KICK_GRACE_MINUTES
+        return max(
+            MIN_TIMED_KICK_GRACE_MINUTES,
+            min(MAX_TIMED_KICK_GRACE_MINUTES, minutes),
+        )
+
+    async def get_timed_kick_grace_minutes(self, db_session: AsyncSession) -> int:
+        """读取定时踢人的宽限时长（分钟）。"""
+        raw_value = await settings_service.get_setting(
+            db_session,
+            "timed_kick_grace_minutes",
+            str(DEFAULT_TIMED_KICK_GRACE_MINUTES),
+        )
+        return self._normalize_timed_kick_grace_minutes(raw_value)
+
+    # ------------------------------------------------------------------
+    # 批量踢人的请求节奏控制
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_kick_interval_seconds(value: Any, default: float) -> float:
+        try:
+            seconds = float(str(value).strip())
+        except (TypeError, ValueError, AttributeError):
+            seconds = float(default)
+        return max(0.0, min(float(MAX_KICK_INTERVAL_SECONDS), seconds))
+
+    async def get_kick_interval_range(self, db_session: AsyncSession) -> tuple[float, float]:
+        """读取批量踢人时两次操作之间的随机等待范围（秒）。"""
+        min_raw = await settings_service.get_setting(
+            db_session,
+            KICK_INTERVAL_SETTING_MIN,
+            str(DEFAULT_KICK_INTERVAL_MIN_SECONDS),
+        )
+        max_raw = await settings_service.get_setting(
+            db_session,
+            KICK_INTERVAL_SETTING_MAX,
+            str(DEFAULT_KICK_INTERVAL_MAX_SECONDS),
+        )
+        min_seconds = self._normalize_kick_interval_seconds(
+            min_raw, DEFAULT_KICK_INTERVAL_MIN_SECONDS
+        )
+        max_seconds = self._normalize_kick_interval_seconds(
+            max_raw, DEFAULT_KICK_INTERVAL_MAX_SECONDS
+        )
+        if max_seconds < min_seconds:
+            min_seconds, max_seconds = max_seconds, min_seconds
+        return min_seconds, max_seconds
+
+    async def _sleep_between_kicks(self, db_session: AsyncSession) -> None:
+        """批量踢出时在两次操作之间随机等待，把请求节奏分散开。
+
+        服务端对同一工作区的连续成员变更比较敏感，批量踢人时逐个紧挨着调用
+        容易触发风控；这里按配置的区间随机等待（默认 10~20 秒）。
+        区间上限配成 0 就完全不做等待。
+        """
+        min_seconds, max_seconds = await self.get_kick_interval_range(db_session)
+        if max_seconds <= 0:
+            return
+        delay = random.uniform(min_seconds, max_seconds)
+        if delay <= 0:
+            return
+        logger.info("批量踢人：随机等待 %.1fs 后处理下一个账号", delay)
+        await asyncio.sleep(delay)
+
+    async def scan_due_timed_members(self, db_session: AsyncSession) -> Dict[str, Any]:
+        """扫描已经到期（含宽限期）的子号。
+
+        判定：``status in (invited, joined)`` 且 ``now >= kick_at + grace_minutes``。
+        ``kick_at`` 由管理员在成员管理里按子号配置（配置时刻 + N 小时）。
+        """
+        try:
+            enabled_raw = await settings_service.get_setting(db_session, "timed_kick_enabled", "false")
+            if str(enabled_raw).strip().lower() not in ("1", "true", "yes", "on"):
+                return {
+                    "success": True,
+                    "enabled": False,
+                    "candidates": [],
+                    "total": 0,
+                    "grace_minutes": None,
+                    "error": None,
+                }
+
+            grace_minutes = await self.get_timed_kick_grace_minutes(db_session)
+            cutoff = get_now() - timedelta(minutes=grace_minutes)
+
+            stmt = (
+                select(TeamEmailMapping, Team)
+                .join(Team, Team.id == TeamEmailMapping.team_id)
+                .where(
+                    TeamEmailMapping.status.in_(("invited", "joined")),
+                    TeamEmailMapping.kick_at.is_not(None),
+                    TeamEmailMapping.kick_at <= cutoff,
+                )
+                .order_by(TeamEmailMapping.kick_at.asc(), TeamEmailMapping.id.asc())
+            )
+            rows = (await db_session.execute(stmt)).all()
+
+            candidates: List[Dict[str, Any]] = []
+            for mapping, team in rows:
+                normalized_email = self.team_service._normalize_member_email(mapping.email)
+                if not normalized_email:
+                    continue
+                owner_email = self.team_service._normalize_member_email(team.email)
+                if owner_email and owner_email == normalized_email:
+                    continue  # 车主永不参与定时踢人
+                candidates.append({
+                    "mapping_id": mapping.id,
+                    "team_id": mapping.team_id,
+                    "email": normalized_email,
+                    "status": mapping.status,
+                    "kick_hours": mapping.kick_hours,
+                    "kick_at": mapping.kick_at.isoformat() if mapping.kick_at else None,
+                })
+
+            return {
+                "success": True,
+                "enabled": True,
+                "candidates": candidates,
+                "total": len(candidates),
+                "grace_minutes": grace_minutes,
+                "error": None,
+            }
+        except Exception as e:
+            logger.exception("扫描定时踢人到期子号失败")
+            return {
+                "success": False,
+                "enabled": None,
+                "candidates": [],
+                "total": 0,
+                "grace_minutes": None,
+                "error": f"扫描失败: {str(e)}",
+            }
+
+    async def kick_timed_member(
+        self,
+        db_session: AsyncSession,
+        team_id: int,
+        email: str,
+    ) -> Dict[str, Any]:
+        """踢出单个已到期的子号。
+
+        只清理 Team 端成员关系并把映射标记为 removed；**不销毁兑换码与兑换记录**，
+        方便重新邀请或继续售后。
+        """
+        try:
+            normalized_email = self.team_service._normalize_member_email(email)
+            if not team_id or not normalized_email:
+                return {
+                    "success": False,
+                    "team_id": team_id,
+                    "email": email,
+                    "category": "skipped",
+                    "skip_reason": "invalid_target",
+                    "error": "team_id 或 email 不合法",
+                }
+
+            # 重读映射做并发兜底：期间可能被手工取消定时、被重新邀请或被别的策略踢掉
+            stmt = select(TeamEmailMapping).where(
+                TeamEmailMapping.team_id == team_id,
+                TeamEmailMapping.email == normalized_email,
+            )
+            mapping = (await db_session.execute(stmt)).scalar_one_or_none()
+            if not mapping or mapping.status not in ("invited", "joined"):
+                return {
+                    "success": True,
+                    "team_id": team_id,
+                    "email": normalized_email,
+                    "category": "skipped",
+                    "skip_reason": "no_active_mapping",
+                    "error": None,
+                }
+            if not mapping.kick_at:
+                return {
+                    "success": True,
+                    "team_id": team_id,
+                    "email": normalized_email,
+                    "category": "skipped",
+                    "skip_reason": "kick_time_cleared",
+                    "error": None,
+                }
+
+            grace_minutes = await self.get_timed_kick_grace_minutes(db_session)
+            if get_now() < mapping.kick_at + timedelta(minutes=grace_minutes):
+                return {
+                    "success": True,
+                    "team_id": team_id,
+                    "email": normalized_email,
+                    "category": "skipped",
+                    "skip_reason": "not_due",
+                    "error": None,
+                }
+
+            # 车主兜底
+            team = await db_session.get(Team, team_id)
+            if team:
+                owner_email = self.team_service._normalize_member_email(team.email)
+                if owner_email and owner_email == normalized_email:
+                    return {
+                        "success": True,
+                        "team_id": team_id,
+                        "email": normalized_email,
+                        "category": "skipped",
+                        "skip_reason": "team_owner",
+                        "error": None,
+                    }
+
+            remove_result = await self.team_service.remove_invite_or_member(
+                team_id, normalized_email, db_session
+            )
+            if not remove_result.get("success"):
+                return {
+                    "success": False,
+                    "team_id": team_id,
+                    "email": normalized_email,
+                    "category": "failed",
+                    "error": remove_result.get("error") or "定时踢出成员失败",
+                }
+
+            await self.team_service.mark_team_email_mapping_removed(
+                team_id=team_id,
+                email=normalized_email,
+                db_session=db_session,
+                source=TIMED_KICK_SOURCE,
+            )
+            await db_session.commit()
+
+            return {
+                "success": True,
+                "team_id": team_id,
+                "email": normalized_email,
+                "category": "kicked",
+                "action": "kicked_timed",
+                "message": remove_result.get("message") or "已按定时踢出成员",
+                "error": None,
+            }
+        except Exception as e:
+            logger.exception("定时踢出成员失败")
+            return {
+                "success": False,
+                "team_id": team_id,
+                "email": email,
+                "category": "failed",
+                "error": f"定时踢出成员失败: {str(e)}",
+            }
+
+    async def run_timed_member_auto_kick(
+        self,
+        db_session: AsyncSession,
+    ) -> Dict[str, Any]:
+        """扫描并踢出所有到期的定时子号（由 timed_kick_enabled 开关控制）。"""
+        scan_result = await self.scan_due_timed_members(db_session)
+        if not scan_result.get("success"):
+            return {
+                "success": False,
+                "enabled": scan_result.get("enabled"),
+                "scanned": 0,
+                "kicked": 0,
+                "skipped": 0,
+                "failed": 0,
+                "results": [],
+                "error": scan_result.get("error") or "扫描失败",
+            }
+        if not scan_result.get("enabled"):
+            return {
+                "success": True,
+                "enabled": False,
+                "scanned": 0,
+                "kicked": 0,
+                "skipped": 0,
+                "failed": 0,
+                "results": [],
+                "error": None,
+            }
+
+        candidates = scan_result.get("candidates", [])
+        results: List[Dict[str, Any]] = []
+        kicked = 0
+        skipped = 0
+        failed = 0
+
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                await self._sleep_between_kicks(db_session)
+            item_result = await self.kick_timed_member(
+                db_session,
+                candidate.get("team_id"),
+                candidate.get("email", ""),
+            )
+            results.append(item_result)
+            category = item_result.get("category")
+            if category == "kicked":
+                kicked += 1
+            elif category == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+
+        return {
+            "success": failed == 0,
+            "enabled": True,
+            "grace_minutes": scan_result.get("grace_minutes"),
+            "scanned": len(candidates),
+            "kicked": kicked,
+            "skipped": skipped,
+            "failed": failed,
+            "results": results,
+            "error": None if failed == 0 else "部分到期子号处理失败",
         }
 
     async def validate_warranty_reuse(

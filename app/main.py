@@ -57,6 +57,10 @@ DEFAULT_WARRANTY_AUTO_KICK_ENABLED = False
 DEFAULT_WARRANTY_AUTO_KICK_INTERVAL_HOURS = 12
 MIN_WARRANTY_AUTO_KICK_INTERVAL_HOURS = 1
 MAX_WARRANTY_AUTO_KICK_INTERVAL_HOURS = 24 * 7
+DEFAULT_TIMED_KICK_ENABLED = False
+DEFAULT_TIMED_KICK_INTERVAL_MINUTES = 1
+MIN_TIMED_KICK_INTERVAL_MINUTES = 1
+MAX_TIMED_KICK_INTERVAL_MINUTES = 60
 
 
 def _safe_int(value, default):
@@ -86,6 +90,64 @@ def normalize_periodic_team_sync_days(refresh_interval_days: int) -> int:
 
 def normalize_warranty_auto_kick_interval_hours(interval_hours: int) -> int:
     return max(MIN_WARRANTY_AUTO_KICK_INTERVAL_HOURS, min(MAX_WARRANTY_AUTO_KICK_INTERVAL_HOURS, interval_hours))
+
+
+def normalize_timed_kick_interval_minutes(interval_minutes: int) -> int:
+    return max(MIN_TIMED_KICK_INTERVAL_MINUTES, min(MAX_TIMED_KICK_INTERVAL_MINUTES, interval_minutes))
+
+
+def configure_timed_member_kick_job(enabled: bool, interval_minutes: int) -> int:
+    """配置（或重配置）"按子号配置时长"的定时踢人任务。"""
+    normalized_interval = normalize_timed_kick_interval_minutes(interval_minutes)
+    existing_job = scheduler.get_job("timed_member_kick")
+
+    if not enabled:
+        if existing_job:
+            scheduler.remove_job("timed_member_kick")
+        return normalized_interval
+
+    trigger = IntervalTrigger(minutes=normalized_interval)
+    if existing_job:
+        scheduler.reschedule_job("timed_member_kick", trigger=trigger)
+    else:
+        scheduler.add_job(
+            scheduled_timed_member_kick,
+            trigger=trigger,
+            id="timed_member_kick",
+            replace_existing=True,
+            max_instances=1,
+            # 与自动踢人一致：开启后立即执行一轮，已到期的子号不等下一个周期
+            next_run_time=get_now(),
+        )
+
+    if not scheduler.running:
+        scheduler.start()
+
+    return normalized_interval
+
+
+async def configure_timed_member_kick_job_from_settings() -> tuple[bool, int]:
+    """从系统设置读取定时踢人配置并应用到定时任务。"""
+    from app.services.settings import settings_service
+
+    async with AsyncSessionLocal() as session:
+        enabled_raw = await settings_service.get_setting(
+            session,
+            "timed_kick_enabled",
+            str(DEFAULT_TIMED_KICK_ENABLED).lower(),
+        )
+        interval_raw = await settings_service.get_setting(
+            session,
+            "timed_kick_interval_minutes",
+            str(DEFAULT_TIMED_KICK_INTERVAL_MINUTES),
+        )
+
+    enabled = str(enabled_raw).lower() in {"1", "true", "yes", "on"}
+    interval_minutes = normalize_timed_kick_interval_minutes(
+        _safe_int(interval_raw, DEFAULT_TIMED_KICK_INTERVAL_MINUTES)
+    )
+    applied_interval = configure_timed_member_kick_job(enabled, interval_minutes)
+    return enabled, applied_interval
 
 
 def configure_periodic_team_sync_job(enabled: bool, interval_hours: int) -> int:
@@ -374,6 +436,37 @@ async def scheduled_warranty_auto_kick():
         logger.error(f"后台邀请过期踢人任务执行失败: {e}")
 
 
+async def scheduled_timed_member_kick():
+    """定时扫描"按子号配置时长"已到期的成员并踢出（到期后再宽限若干分钟）。"""
+    from app.services.warranty import warranty_service
+
+    try:
+        async with AsyncSessionLocal() as session:
+            stats = await warranty_service.run_timed_member_auto_kick(session)
+            if not stats.get("enabled"):
+                return
+            if stats.get("success"):
+                logger.info(
+                    "定时踢人完成: scanned=%s kicked=%s skipped=%s failed=%s grace=%smin",
+                    stats.get("scanned", 0),
+                    stats.get("kicked", 0),
+                    stats.get("skipped", 0),
+                    stats.get("failed", 0),
+                    stats.get("grace_minutes"),
+                )
+            else:
+                logger.warning(
+                    "定时踢人部分失败: scanned=%s kicked=%s skipped=%s failed=%s error=%s",
+                    stats.get("scanned", 0),
+                    stats.get("kicked", 0),
+                    stats.get("skipped", 0),
+                    stats.get("failed", 0),
+                    stats.get("error"),
+                )
+    except Exception as e:
+        logger.error(f"定时踢人任务执行失败: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -437,6 +530,15 @@ async def lifespan(app: FastAPI):
             )
         else:
             logger.info("质保过期自动踢人任务已禁用")
+
+        timed_kick_enabled, timed_kick_interval = await configure_timed_member_kick_job_from_settings()
+        if timed_kick_enabled:
+            logger.info(
+                "定时任务已启动: 每 %s 分钟检查一次定时踢人（按子号配置的时长）",
+                timed_kick_interval,
+            )
+        else:
+            logger.info("定时踢人任务已禁用")
 
         logger.info("数据库初始化完成")
     except Exception as exc:

@@ -423,6 +423,23 @@ class TeamService:
         return normalized or None
 
     @staticmethod
+    def _to_aware_isoformat(value: Optional[datetime]) -> Optional[str]:
+        """把库里存的 naive 本地时间转成带时区偏移的 ISO 字符串。
+
+        数据库里的时间统一是 ``settings.timezone`` 下的 naive datetime（见
+        ``get_now()``）。如果直接把这个裸字符串交给前端，``new Date()`` 会按
+        **浏览器所在时区**解析，跨时区时会算出错误的剩余时间。带上偏移量后
+        前端才能还原成正确的绝对时刻。
+        """
+        if not value:
+            return None
+        try:
+            return pytz.timezone(settings.timezone).localize(value).isoformat()
+        except Exception:
+            logger.warning("时间转带时区字符串失败，回退为裸 ISO: %s", value)
+            return value.isoformat()
+
+    @staticmethod
     def _normalize_invite_status(invite: Dict[str, Any]) -> str:
         """统一邀请状态字段，优先使用语义更明确的 state/invite_status。"""
         for key in ("invite_status", "state"):
@@ -704,8 +721,12 @@ class TeamService:
         source: str = "sync",
         seen_at: Optional[datetime] = None
     ) -> Optional[TeamEmailMapping]:
-        """将 Team-邮箱映射标记为已移除。"""
-        return await self.upsert_team_email_mapping(
+        """将 Team-邮箱映射标记为已移除。
+
+        成员已经离开 Team，定时踢人的计时一并清空，否则重新邀请后会被旧的
+        到期时间立刻再次踢掉。
+        """
+        mapping = await self.upsert_team_email_mapping(
             team_id=team_id,
             email=email,
             status=TEAM_EMAIL_STATUS_REMOVED,
@@ -713,6 +734,10 @@ class TeamService:
             source=source,
             seen_at=seen_at,
         )
+        if mapping is not None:
+            mapping.kick_at = None
+            mapping.kick_hours = None
+        return mapping
 
     async def _reconcile_team_email_mappings(
         self,
@@ -2486,6 +2511,24 @@ class TeamService:
             all_members = []
             joined_emails: set[str] = set()
 
+            # 本地映射：用于带上定时踢人信息
+            mapping_rows = await db_session.execute(
+                select(TeamEmailMapping).where(TeamEmailMapping.team_id == team_id)
+            )
+            kick_by_email = {
+                row.email: row
+                for row in mapping_rows.scalars().all()
+                if row.email
+            }
+
+            def _kick_fields(email: Optional[str]) -> Dict[str, Any]:
+                mapping = kick_by_email.get(email) if email else None
+                kick_at = getattr(mapping, "kick_at", None) if mapping else None
+                return {
+                    "kick_at": self._to_aware_isoformat(kick_at),
+                    "kick_hours": getattr(mapping, "kick_hours", None) if mapping else None,
+                }
+
             # 处理已加入成员
             for m in members_result["members"]:
                 normalized_email = self._normalize_member_email(m.get("email"))
@@ -2498,7 +2541,8 @@ class TeamService:
                     "role": m.get("role"),
                     "seat_type": ChatGPTService.normalize_seat_type(m.get("seat_type")),
                     "added_at": m.get("created_time"),
-                    "status": "joined"
+                    "status": "joined",
+                    **_kick_fields(normalized_email),
                 })
 
             # 处理待加入成员
@@ -2508,14 +2552,16 @@ class TeamService:
                     joined_emails=joined_emails,
                 )
                 for inv in pending_invites:
+                    invite_email = inv.get("email_address")
                     all_members.append({
                         "user_id": None, # 邀请还没有 user_id
-                        "email": inv.get("email_address"),
+                        "email": invite_email,
                         "name": None,
                         "role": inv.get("role"),
                         "seat_type": ChatGPTService.normalize_seat_type(inv.get("seat_type")),
                         "added_at": inv.get("created_time"),
-                        "status": "invited"
+                        "status": "invited",
+                        **_kick_fields(invite_email),
                     })
 
             logger.info(f"获取 Team {team_id} 成员列表成功: 共 {len(all_members)} 个成员 (已加入: {members_result['total']})")
@@ -3123,6 +3169,150 @@ class TeamService:
             "results": results,
             "error": None,
         }
+
+    # 定时踢人：允许配置的时长范围（小时）
+    MIN_KICK_HOURS = 1
+    MAX_KICK_HOURS = 24 * 365
+
+    @staticmethod
+    def parse_kick_at(value: Optional[str]) -> Optional[datetime]:
+        """解析前端传来的"北京时间"到期时间字符串（精确到分）。
+
+        接受 ``YYYY-MM-DDTHH:MM`` / ``YYYY-MM-DD HH:MM[:SS]`` / ``YYYY-MM-DD``，
+        统一按 ``settings.timezone`` 解释成库里的本地 naive 时间。空值表示取消定时。
+        """
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+
+        normalized = text.replace("T", " ").strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(normalized, fmt)
+            except ValueError:
+                continue
+        raise ValueError(f"无法解析的踢出时间: {value}")
+
+    async def set_member_kick_time(
+        self,
+        team_id: int,
+        emails: List[str],
+        hours: Optional[int],
+        db_session: AsyncSession,
+        kick_at: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """为子号批量配置定时踢人时间。
+
+        - ``kick_at``（推荐）：指定的到期时刻，按**北京时间**解释，精确到分；
+        - ``hours``：兼容参数，``配置时刻 + hours``，传 0 表示取消；
+        - 两者都为空 / 0：取消定时，恢复"不限时"。
+
+        车主账号不允许配置，避免把自己踢出 Team。
+        """
+        try:
+            team = await db_session.get(Team, team_id)
+            if not team:
+                return self._admin_error("team_not_found", f"未找到 ID 为 {team_id} 的 Team")
+
+            now = get_now()
+            target_kick_at: Optional[datetime] = None
+            derived_hours: Optional[int] = None
+
+            if kick_at is not None:
+                if kick_at <= now:
+                    return self._admin_error(
+                        "invalid_kick_at",
+                        "踢出时间必须晚于当前时间（北京时间）",
+                    )
+                target_kick_at = kick_at
+                derived_hours = max(
+                    int(round((kick_at - now).total_seconds() / 3600)), 0
+                )
+            elif hours is not None and str(hours).strip() != "":
+                try:
+                    parsed_hours = int(hours)
+                except (TypeError, ValueError):
+                    return self._admin_error("invalid_kick_hours", f"时长必须是整数小时: {hours}")
+                if parsed_hours == 0:
+                    target_kick_at = None
+                elif parsed_hours < self.MIN_KICK_HOURS or parsed_hours > self.MAX_KICK_HOURS:
+                    return self._admin_error(
+                        "invalid_kick_hours",
+                        f"时长必须在 {self.MIN_KICK_HOURS}~{self.MAX_KICK_HOURS} 小时之间",
+                    )
+                else:
+                    derived_hours = parsed_hours
+                    target_kick_at = now + timedelta(hours=parsed_hours)
+
+            owner_email = self._normalize_member_email(team.email)
+            results: List[Dict[str, Any]] = []
+            updated = 0
+
+            for raw_email in emails or []:
+                normalized_email = self._normalize_member_email(raw_email)
+                display_email = str(raw_email or "").strip()
+
+                if not normalized_email:
+                    results.append({
+                        "email": display_email,
+                        "success": False,
+                        "error": "邮箱不合法",
+                    })
+                    continue
+                if owner_email and normalized_email == owner_email:
+                    results.append({
+                        "email": normalized_email,
+                        "success": False,
+                        "error": "车主账号不可配置定时踢人",
+                    })
+                    continue
+
+                mapping_result = await db_session.execute(
+                    select(TeamEmailMapping).where(
+                        TeamEmailMapping.team_id == team_id,
+                        TeamEmailMapping.email == normalized_email,
+                    )
+                )
+                mapping = mapping_result.scalar_one_or_none()
+                if not mapping or mapping.status not in ACTIVE_TEAM_EMAIL_STATUSES:
+                    results.append({
+                        "email": normalized_email,
+                        "success": False,
+                        "error": "该成员不在 Team 中（或已被移除）",
+                    })
+                    continue
+
+                mapping.kick_at = target_kick_at
+                mapping.kick_hours = derived_hours if target_kick_at else None
+                updated += 1
+                results.append({
+                    "email": normalized_email,
+                    "success": True,
+                    "kick_hours": mapping.kick_hours,
+                    "kick_at": self._to_aware_isoformat(mapping.kick_at),
+                })
+
+            await db_session.commit()
+
+            if target_kick_at:
+                action = f"踢出时间已设为 {target_kick_at.strftime('%Y-%m-%d %H:%M')}（北京时间）"
+            else:
+                action = "已取消定时踢人"
+            return {
+                "success": updated > 0,
+                "message": f"{action}（{updated} 个子号）",
+                "updated": updated,
+                "kick_hours": derived_hours if target_kick_at else None,
+                "kick_at": self._to_aware_isoformat(target_kick_at),
+                "results": results,
+                "error": None if updated > 0 else "没有子号被更新",
+            }
+        except Exception:
+            await db_session.rollback()
+            logger.exception("配置定时踢人失败")
+            return self._admin_error("kick_time_failed", "配置定时踢人失败，请稍后重试")
 
     async def delete_team_member(
         self,

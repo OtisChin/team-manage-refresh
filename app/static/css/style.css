@@ -76,6 +76,10 @@ body {
 
 /* Admin dark style (inspired by redeem page) */
 body.admin-theme {
+    /* 注意：这里的深色变量已被文件后段 "2026 workspace refresh" 的同名规则
+       （body.admin-theme）整体覆盖，实际生效的是浅色配色。原生控件请使用浅色
+       color-scheme，否则 Chrome 会把日期选择器图标画成白色，落在浅底上看不见。 */
+    color-scheme: light;
     --primary: #4f8ef7;
     --primary-hover: #3d7fe9;
     --primary-soft: rgba(79, 142, 247, 0.16);
@@ -956,6 +960,12 @@ body.admin-theme .toast {
     border-color: var(--info-soft);
 }
 
+.seat-chip-timed {
+    background: var(--success-soft);
+    color: var(--success);
+    border-color: var(--success-soft);
+}
+
 .seat-breakdown-block {
     display: flex;
     flex-direction: column;
@@ -1341,6 +1351,314 @@ body.admin-theme .toast {
 .modal-overlay.show .modal {
     transform: scale(1) translateY(0);
     opacity: 1;
+}
+
+/* 宽版模态框：成员管理等列数较多的表格用，窄屏下自动收缩 */
+.modal.modal-wide {
+    max-width: min(1180px, calc(100vw - 4rem));
+}
+
+/* ===== 定时踢人：时间选择 ===== */
+
+.kick-toolbar-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.7rem;
+}
+
+.kick-toolbar-title {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+.kick-count-badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    line-height: 1.6;
+    padding: 0.05rem 0.5rem;
+    border-radius: var(--radius-full);
+    background: var(--bg-main);
+    color: var(--text-dim);
+    border: 1px solid var(--border-base);
+    white-space: nowrap;
+    transition: var(--transition-fast);
+}
+
+.kick-count-badge.is-active {
+    background: var(--success-soft);
+    color: var(--success);
+    border-color: var(--success-soft);
+}
+
+.kick-time-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+/* 时间字段做成一个可按的按钮，视觉上跟随后台的卡通风格 */
+.kick-time-picker {
+    position: relative;
+    display: inline-block;
+}
+
+.kick-time-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    height: 38px;
+    padding: 0 0.85rem;
+    background: var(--bg-surface);
+    border: var(--ca-border, 1px solid var(--border-base));
+    border-radius: var(--ca-r-sm, var(--radius-sm));
+    box-shadow: var(--ca-shadow-xs, none);
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform var(--ca-tx, 0.18s cubic-bezier(.4, 0, .2, 1)),
+                box-shadow var(--ca-tx, 0.18s cubic-bezier(.4, 0, .2, 1)),
+                background var(--ca-tx, 0.18s cubic-bezier(.4, 0, .2, 1));
+}
+
+.kick-time-field:hover,
+.kick-time-picker.is-open .kick-time-field {
+    background: var(--ca-surface-soft, var(--bg-main));
+    transform: translate(-1px, -1px);
+    box-shadow: var(--ca-shadow-sm, var(--shadow-sm));
+}
+
+.kick-time-field > svg {
+    width: 16px;
+    height: 16px;
+    color: var(--ca-ink-muted, var(--text-dim));
+    flex-shrink: 0;
+}
+
+.kick-time-value {
+    min-width: 140px;
+    text-align: left;
+}
+
+.kick-time-value.is-placeholder {
+    color: var(--ca-ink-muted, var(--text-dim));
+    font-weight: 500;
+}
+
+/* ===== 自绘日历弹层 =====
+   挂在 body 下并用 fixed 定位：弹窗内的 .content-section 带 transform，
+   会形成堆叠上下文把 z-index 困住，导致日历被后面的区块盖住。 */
+
+.kick-calendar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 3000;
+    width: 304px;
+    padding: 0.9rem;
+    background: var(--bg-surface);
+    border: var(--ca-border, 1px solid var(--border-base));
+    border-radius: var(--ca-r-md, var(--radius-md));
+    box-shadow: var(--ca-shadow-md, var(--shadow-lg));
+}
+
+.kick-calendar[hidden] {
+    display: none;
+}
+
+.kick-cal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.7rem;
+}
+
+.kick-cal-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-main);
+}
+
+.kick-cal-nav {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--ca-surface-soft, var(--bg-main));
+    border: var(--ca-border-thin, 1px solid var(--border-base));
+    border-radius: var(--ca-r-sm, var(--radius-sm));
+    box-shadow: var(--ca-shadow-xs, none);
+    color: var(--text-main);
+    cursor: pointer;
+    transition: transform var(--ca-tx, 0.18s), box-shadow var(--ca-tx, 0.18s);
+}
+
+.kick-cal-nav:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: var(--ca-shadow-sm, none);
+}
+
+.kick-cal-nav svg {
+    width: 15px;
+    height: 15px;
+}
+
+.kick-cal-weekdays,
+.kick-cal-days {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 3px;
+}
+
+.kick-cal-weekdays {
+    margin-bottom: 0.3rem;
+}
+
+.kick-cal-weekdays span {
+    text-align: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--ca-ink-muted, var(--text-dim));
+    padding: 0.1rem 0;
+}
+
+.kick-cal-day {
+    height: 32px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 2px solid transparent;
+    border-radius: var(--ca-r-sm, var(--radius-sm));
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-main);
+    cursor: pointer;
+    transition: background var(--ca-tx, 0.18s), box-shadow var(--ca-tx, 0.18s);
+}
+
+.kick-cal-day:hover {
+    background: var(--primary-soft);
+    border-color: var(--ca-ink, var(--border-base));
+}
+
+.kick-cal-day.is-today {
+    border-color: var(--ca-ink-muted, var(--border-base));
+    border-style: dashed;
+}
+
+.kick-cal-day.is-selected {
+    background: var(--primary);
+    border-color: var(--ca-ink, var(--border-base));
+    color: var(--ca-ink, #fff);
+    box-shadow: var(--ca-shadow-xs, none);
+}
+
+.kick-cal-day.is-empty {
+    cursor: default;
+}
+
+.kick-cal-time {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.7rem;
+    padding-top: 0.7rem;
+    border-top: var(--ca-border-thin, 1px solid var(--border-base));
+}
+
+.kick-cal-time-label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--ca-ink-muted, var(--text-dim));
+}
+
+.kick-cal-select {
+    height: 30px;
+    padding: 0 0.35rem;
+    background: var(--bg-surface);
+    border: var(--ca-border-thin, 1px solid var(--border-base));
+    border-radius: var(--ca-r-sm, var(--radius-sm));
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.kick-cal-colon {
+    font-weight: 700;
+    color: var(--text-main);
+}
+
+.kick-cal-quick {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.kick-cal-quick button {
+    padding: 0.22rem 0.6rem;
+    background: var(--ca-surface-soft, var(--bg-main));
+    border: var(--ca-border-thin, 1px solid var(--border-base));
+    border-radius: var(--ca-r-pill, var(--radius-full));
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--ca-tx, 0.18s);
+}
+
+.kick-cal-quick button:hover {
+    background: var(--primary-soft);
+}
+
+.kick-cal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.8rem;
+}
+
+.kick-time-preview {
+    margin-top: 0.55rem;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    line-height: 1.5;
+}
+
+.kick-time-preview.is-ready {
+    color: var(--success);
+}
+
+.kick-time-preview.is-invalid {
+    color: var(--danger);
+}
+
+/* 勾选后的行整体高亮：批量配置时长时方便确认选中范围 */
+.data-table tbody tr.member-row-selected,
+.data-table tbody tr.member-row-selected:hover {
+    background: var(--primary-soft);
+}
+
+@media (max-width: 900px) {
+    .kick-time-picker {
+        display: block;
+    }
+
+    .kick-time-field {
+        width: 100%;
+    }
 }
 
 .modal-header {
