@@ -1,0 +1,332 @@
+"""
+数据库自动迁移模块
+在应用启动时自动检测并执行必要的数据库迁移
+"""
+import logging
+import sqlite3
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def get_db_path() -> Path | None:
+    """返回文件型 SQLite 数据库路径；其他后端没有可迁移的本地数据库文件。"""
+    from app.config import settings
+
+    database_url = settings.database_url
+    if not database_url.startswith("sqlite"):
+        return None
+
+    db_file = database_url.split(":///", 1)[-1]
+    if not db_file or db_file == ":memory:":
+        return None
+    return Path(db_file)
+
+
+def column_exists(cursor, table_name, column_name):
+    """检查表中是否存在指定列"""
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    columns = [row[1] for row in cursor.fetchall()]
+    return column_name in columns
+
+
+def table_exists(cursor, table_name):
+    """检查表是否存在"""
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,)
+    )
+    return cursor.fetchone() is not None
+
+
+def run_auto_migration():
+    """
+    自动运行数据库迁移
+    检测缺失的列并自动添加
+    """
+    db_path = get_db_path()
+    if db_path is None:
+        logger.info("当前数据库不是文件型 SQLite，跳过 SQLite 自动迁移")
+        return
+
+    if not db_path.exists():
+        logger.info("数据库文件不存在，跳过迁移")
+        return
+    
+    logger.info("开始检查数据库迁移...")
+    
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        migrations_applied = []
+        
+        # 检查并添加质保相关字段
+        if not column_exists(cursor, "redemption_codes", "has_warranty"):
+            logger.info("添加 redemption_codes.has_warranty 字段")
+            cursor.execute("""
+                ALTER TABLE redemption_codes 
+                ADD COLUMN has_warranty BOOLEAN DEFAULT 0
+            """)
+            migrations_applied.append("redemption_codes.has_warranty")
+        
+        if not column_exists(cursor, "redemption_codes", "warranty_expires_at"):
+            logger.info("添加 redemption_codes.warranty_expires_at 字段")
+            cursor.execute("""
+                ALTER TABLE redemption_codes 
+                ADD COLUMN warranty_expires_at DATETIME
+            """)
+            migrations_applied.append("redemption_codes.warranty_expires_at")
+        
+        if not column_exists(cursor, "redemption_codes", "warranty_days"):
+            logger.info("添加 redemption_codes.warranty_days 字段")
+            cursor.execute("""
+                ALTER TABLE redemption_codes 
+                ADD COLUMN warranty_days INTEGER DEFAULT 30
+            """)
+            migrations_applied.append("redemption_codes.warranty_days")
+        
+        if not column_exists(cursor, "redemption_records", "is_warranty_redemption"):
+            logger.info("添加 redemption_records.is_warranty_redemption 字段")
+            cursor.execute("""
+                ALTER TABLE redemption_records 
+                ADD COLUMN is_warranty_redemption BOOLEAN DEFAULT 0
+            """)
+            migrations_applied.append("redemption_records.is_warranty_redemption")
+
+        # 检查并添加 Token 刷新相关字段
+        if not column_exists(cursor, "teams", "refresh_token_encrypted"):
+            logger.info("添加 teams.refresh_token_encrypted 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN refresh_token_encrypted TEXT")
+            migrations_applied.append("teams.refresh_token_encrypted")
+
+        if not column_exists(cursor, "teams", "id_token_encrypted"):
+            logger.info("添加 teams.id_token_encrypted 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN id_token_encrypted TEXT")
+            migrations_applied.append("teams.id_token_encrypted")
+
+        if not column_exists(cursor, "teams", "session_token_encrypted"):
+            logger.info("添加 teams.session_token_encrypted 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN session_token_encrypted TEXT")
+            migrations_applied.append("teams.session_token_encrypted")
+
+        if not column_exists(cursor, "teams", "client_id"):
+            logger.info("添加 teams.client_id 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN client_id VARCHAR(100)")
+            migrations_applied.append("teams.client_id")
+
+        if not column_exists(cursor, "teams", "error_count"):
+            logger.info("添加 teams.error_count 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN error_count INTEGER DEFAULT 0")
+            migrations_applied.append("teams.error_count")
+
+        if not column_exists(cursor, "teams", "account_role"):
+            logger.info("添加 teams.account_role 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN account_role VARCHAR(50)")
+            migrations_applied.append("teams.account_role")
+
+        if not column_exists(cursor, "teams", "device_code_auth_enabled"):
+            logger.info("添加 teams.device_code_auth_enabled 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN device_code_auth_enabled BOOLEAN DEFAULT 0")
+            migrations_applied.append("teams.device_code_auth_enabled")
+        
+
+        if not column_exists(cursor, "teams", "pool_type"):
+            logger.info("添加 teams.pool_type 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN pool_type VARCHAR(20) DEFAULT 'normal'")
+            migrations_applied.append("teams.pool_type")
+
+        if not column_exists(cursor, "teams", "warranty_seat_enabled"):
+            logger.info("添加 teams.warranty_seat_enabled 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN warranty_seat_enabled BOOLEAN DEFAULT 0")
+            migrations_applied.append("teams.warranty_seat_enabled")
+
+        # 待接受邀请数：不占席位，单独记录用于展示
+        if not column_exists(cursor, "teams", "pending_members"):
+            logger.info("添加 teams.pending_members 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN pending_members INTEGER DEFAULT 0")
+            migrations_applied.append("teams.pending_members")
+
+        # 席位明细：按席型（default=Standard 普通 / prolite=Premium 高级）分开维护
+        seat_columns = [
+            ("seats_default_total", "INTEGER DEFAULT 0"),
+            ("seats_default_assigned", "INTEGER DEFAULT 0"),
+            ("seats_default_available", "INTEGER DEFAULT 0"),
+            ("seats_prolite_total", "INTEGER DEFAULT 0"),
+            ("seats_prolite_assigned", "INTEGER DEFAULT 0"),
+            ("seats_prolite_available", "INTEGER DEFAULT 0"),
+            ("seats_synced_at", "DATETIME"),
+        ]
+        for seat_column, seat_column_type in seat_columns:
+            if not column_exists(cursor, "teams", seat_column):
+                logger.info(f"添加 teams.{seat_column} 字段")
+                cursor.execute(
+                    f"ALTER TABLE teams ADD COLUMN {seat_column} {seat_column_type}"
+                )
+                migrations_applied.append(f"teams.{seat_column}")
+
+        if not column_exists(cursor, "redemption_codes", "pool_type"):
+            logger.info("添加 redemption_codes.pool_type 字段")
+            cursor.execute("ALTER TABLE redemption_codes ADD COLUMN pool_type VARCHAR(20) DEFAULT 'normal'")
+            migrations_applied.append("redemption_codes.pool_type")
+
+        if not column_exists(cursor, "redemption_codes", "reusable_by_seat"):
+            logger.info("添加 redemption_codes.reusable_by_seat 字段")
+            cursor.execute("ALTER TABLE redemption_codes ADD COLUMN reusable_by_seat BOOLEAN DEFAULT 0")
+            migrations_applied.append("redemption_codes.reusable_by_seat")
+
+        if not column_exists(cursor, "redemption_codes", "extension_days"):
+            logger.info("添加 redemption_codes.extension_days 字段")
+            cursor.execute("ALTER TABLE redemption_codes ADD COLUMN extension_days INTEGER DEFAULT 0")
+            migrations_applied.append("redemption_codes.extension_days")
+
+        if not table_exists(cursor, "team_email_mappings"):
+            logger.info("创建 team_email_mappings 表")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS team_email_mappings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    team_id INTEGER NOT NULL,
+                    email VARCHAR(255) NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'invited',
+                    source VARCHAR(20) NOT NULL DEFAULT 'sync',
+                    last_seen_at DATETIME,
+                    missing_sync_count INTEGER NOT NULL DEFAULT 0,
+                    is_admin_invited BOOLEAN NOT NULL DEFAULT 0,
+                    created_at DATETIME,
+                    updated_at DATETIME,
+                    FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE
+                )
+            """)
+            migrations_applied.append("team_email_mappings")
+
+        if table_exists(cursor, "team_email_mappings") and not column_exists(cursor, "team_email_mappings", "missing_sync_count"):
+            logger.info("添加 team_email_mappings.missing_sync_count 字段")
+            cursor.execute("""
+                ALTER TABLE team_email_mappings
+                ADD COLUMN missing_sync_count INTEGER NOT NULL DEFAULT 0
+            """)
+            migrations_applied.append("team_email_mappings.missing_sync_count")
+
+        if table_exists(cursor, "team_email_mappings") and not column_exists(cursor, "team_email_mappings", "is_admin_invited"):
+            logger.info("添加 team_email_mappings.is_admin_invited 字段")
+            cursor.execute("""
+                ALTER TABLE team_email_mappings
+                ADD COLUMN is_admin_invited BOOLEAN NOT NULL DEFAULT 0
+            """)
+            migrations_applied.append("team_email_mappings.is_admin_invited")
+
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_team_email_unique
+            ON team_email_mappings (team_id, email)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_team_email_email
+            ON team_email_mappings (email)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_team_email_status
+            ON team_email_mappings (team_id, status)
+        """)
+
+        if not table_exists(cursor, "renewal_requests"):
+            logger.info("创建 renewal_requests 表")
+            cursor.execute("""
+                CREATE TABLE renewal_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email VARCHAR(255) NOT NULL,
+                    code VARCHAR(32) NOT NULL,
+                    team_id INTEGER,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    requested_at DATETIME,
+                    handled_at DATETIME,
+                    extension_days INTEGER,
+                    admin_note TEXT,
+                    FOREIGN KEY(code) REFERENCES redemption_codes(code),
+                    FOREIGN KEY(team_id) REFERENCES teams(id)
+                )
+            """)
+            migrations_applied.append("renewal_requests")
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_renewal_request_status
+            ON renewal_requests (status)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_renewal_request_email
+            ON renewal_requests (email)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_renewal_request_code
+            ON renewal_requests (code)
+        """)
+
+        # 把 renewal_requests.code 从 NOT NULL 改为允许 NULL：
+        # 兑换码销毁后 extended/ignored 历史保留作为审计证据，需要 code 可空。
+        # SQLite 不支持 ALTER COLUMN，必须重建表。
+        cursor.execute("PRAGMA table_info(renewal_requests)")
+        rr_cols = {row[1]: row for row in cursor.fetchall()}  # name -> full row
+        if rr_cols and rr_cols.get("code") and rr_cols["code"][3] == 1:
+            # 第四列 (notnull) == 1 表示当前 NOT NULL，需要重建
+            logger.info("renewal_requests.code 改为允许 NULL，重建表")
+            cursor.execute("PRAGMA foreign_keys=OFF")
+            cursor.execute("""
+                CREATE TABLE renewal_requests_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email VARCHAR(255) NOT NULL,
+                    code VARCHAR(32),
+                    team_id INTEGER,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    requested_at DATETIME,
+                    handled_at DATETIME,
+                    extension_days INTEGER,
+                    admin_note TEXT,
+                    FOREIGN KEY(code) REFERENCES redemption_codes(code),
+                    FOREIGN KEY(team_id) REFERENCES teams(id)
+                )
+            """)
+            cursor.execute("""
+                INSERT INTO renewal_requests_new
+                (id, email, code, team_id, status, requested_at, handled_at, extension_days, admin_note)
+                SELECT id, email, code, team_id, status, requested_at, handled_at, extension_days, admin_note
+                FROM renewal_requests
+            """)
+            cursor.execute("DROP TABLE renewal_requests")
+            cursor.execute("ALTER TABLE renewal_requests_new RENAME TO renewal_requests")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_renewal_request_status
+                ON renewal_requests (status)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_renewal_request_email
+                ON renewal_requests (email)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_renewal_request_code
+                ON renewal_requests (code)
+            """)
+            cursor.execute("PRAGMA foreign_keys=ON")
+            migrations_applied.append("renewal_requests.code -> NULLABLE")
+
+        # 提交更改
+        conn.commit()
+        
+        if migrations_applied:
+            logger.info(f"数据库迁移完成，应用了 {len(migrations_applied)} 个迁移: {', '.join(migrations_applied)}")
+        else:
+            logger.info("数据库已是最新版本，无需迁移")
+        
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"数据库迁移失败: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    # 允许直接运行此脚本进行迁移
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    run_auto_migration()
+    print("迁移完成")

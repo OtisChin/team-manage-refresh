@@ -1,0 +1,12 @@
+# 本地构建部署覆盖文件（docker compose 会自动读取并与 docker-compose.yml 合并）。
+#
+# 作用：忽略 docker-compose.yml 里的 GHCR 预构建镜像，改为用仓库内的 Dockerfile
+# 构建当前代码，并打上本地 tag，便于本地开发 / 验证。
+#
+# 使用：docker compose build && docker compose up -d
+services:
+  app:
+    image: team-manage-refresh:local
+    build:
+      context: .
+      dockerfile: Dockerfile
