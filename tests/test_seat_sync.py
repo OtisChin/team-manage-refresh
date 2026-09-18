@@ -7,11 +7,13 @@
 """
 
 import unittest
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 from app.models import Team
 from app.services.chatgpt import ChatGPTService
 from app.services.team import TeamService
+from app.utils.time_utils import get_now
 
 # 取自真实 HAR（chatgpt.com.har）：Business 工作区买了 2 个 Standard 席位，已用 1 个
 REAL_SUBSCRIPTION_PAYLOAD = {
@@ -388,6 +390,111 @@ class SeatPurchasePromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(team.status, "active")
         db_session.commit.assert_not_awaited()
+
+
+class AccessDeadlineTests(unittest.TestCase):
+    """展示用账期（expires_at=renews_at）与可用性判定（access_until=expires_at）必须分开。
+
+    OpenAI 的 entitlement.expires_at 恒比 renews_at 晚若干小时（实测 6h）：
+    - 展示要跟账单一致 → 用 renews_at
+    - 判断"还能不能卖"要用真正失效的时刻 → 用 expires_at
+    """
+
+    @staticmethod
+    def _team(**kwargs):
+        team = Team(email="owner@example.com", access_token_encrypted="x")
+        for key, value in kwargs.items():
+            setattr(team, key, value)
+        return team
+
+    def test_账期刚过但权益仍在时不算过期(self):
+        now = get_now()
+        team = self._team(
+            expires_at=now - timedelta(minutes=10),   # 账期已过
+            access_until=now + timedelta(hours=6),    # 但权益还有 6 小时
+        )
+
+        self.assertFalse(TeamService._is_access_expired(team))
+
+    def test_权益失效后才算过期(self):
+        now = get_now()
+        team = self._team(
+            expires_at=now - timedelta(hours=7),
+            access_until=now - timedelta(hours=1),
+        )
+
+        self.assertTrue(TeamService._is_access_expired(team))
+
+    def test_老数据回退到账期字段(self):
+        now = get_now()
+        team = self._team(
+            expires_at=now - timedelta(minutes=1),
+            access_until=None,
+        )
+
+        self.assertTrue(TeamService._is_access_expired(team))
+
+    def test_两个字段都为空时不算过期(self):
+        team = self._team(expires_at=None, access_until=None)
+
+        self.assertFalse(TeamService._is_access_expired(team))
+
+    def test_可传入参考时间(self):
+        now = get_now()
+        team = self._team(expires_at=None, access_until=now + timedelta(hours=2))
+
+        self.assertFalse(TeamService._is_access_expired(team, now))
+        self.assertTrue(TeamService._is_access_expired(team, now + timedelta(hours=3)))
+
+
+class AccountInfoExpiryTests(unittest.IsolatedAsyncioTestCase):
+    """到期时间必须取 renews_at：OpenAI 的 expires_at 恒比它晚 6 小时，与账单不符。"""
+
+    @staticmethod
+    def _payload(renews_at, period_ends_at):
+        entitlement = {"subscription_plan": "chatgptteamplan", "has_active_subscription": True}
+        if renews_at is not None:
+            entitlement["renews_at"] = renews_at
+        if period_ends_at is not None:
+            entitlement["expires_at"] = period_ends_at
+        return {
+            "accounts": {
+                "acc-1": {
+                    "account": {"name": "Org", "plan_type": "team", "account_user_role": "account-owner"},
+                    "entitlement": entitlement,
+                }
+            }
+        }
+
+    async def _fetch(self, payload):
+        service = ChatGPTService()
+
+        async def fake_make_request(method, url, headers, json_data=None, db_session=None, identifier="default"):
+            return {"success": True, "data": payload, "error": None}
+
+        service._make_request = fake_make_request
+        result = await service.get_account_info("token", db_session=None)
+        self.assertTrue(result["success"], result)
+        return result["accounts"][0]
+
+    async def test_prefers_renews_at_over_expires_at(self):
+        account = await self._fetch(self._payload(
+            renews_at="2026-09-20T11:21:48+00:00",
+            period_ends_at="2026-09-20T17:21:48+00:00",
+        ))
+
+        self.assertEqual(account["expires_at"], "2026-09-20T11:21:48+00:00")
+        self.assertEqual(account["renews_at"], "2026-09-20T11:21:48+00:00")
+        self.assertEqual(account["period_ends_at"], "2026-09-20T17:21:48+00:00")
+
+    async def test_falls_back_to_expires_at_when_renews_at_missing(self):
+        account = await self._fetch(self._payload(
+            renews_at=None,
+            period_ends_at="2026-09-20T17:21:48+00:00",
+        ))
+
+        self.assertEqual(account["expires_at"], "2026-09-20T17:21:48+00:00")
+        self.assertEqual(account["renews_at"], "")
 
 
 class FallbackMaxMembersTests(unittest.IsolatedAsyncioTestCase):

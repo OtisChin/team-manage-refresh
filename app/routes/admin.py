@@ -287,6 +287,8 @@ async def admin_dashboard(
             "live_teams": team_stats["live"],
             "banned_teams": team_stats["banned"],
             "expired_teams": team_stats["expired"],
+            "prolite_seats_total": team_stats.get("prolite_seats_total", 0),
+            "prolite_seats_assigned": team_stats.get("prolite_seats_assigned", 0),
         }
 
         context = await build_admin_base_context(request, db, current_user, "dashboard")
@@ -349,6 +351,8 @@ async def welfare_dashboard(
         stats = {
             "total_teams": team_stats["total"],
             "available_teams": team_stats["available"],
+            "prolite_seats_total": team_stats.get("prolite_seats_total", 0),
+            "prolite_seats_assigned": team_stats.get("prolite_seats_assigned", 0),
             "remaining_spots": remaining_spots,
             "welfare_code": welfare_code,
             "welfare_code_limit": configured_limit,

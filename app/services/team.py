@@ -33,6 +33,17 @@ ACTIVE_TEAM_EMAIL_STATUSES = (
 )
 
 
+def _access_deadline_expr():
+    """SQL 表达式：Team 权益真正失效的时刻。
+
+    - ``access_until``：OpenAI ``entitlement.expires_at``，订阅账期结束后仍保留的一小段容错窗口；
+    - ``expires_at``：订阅账期本身（``renews_at``，与账单页一致）。
+
+    **可用性判定一律用前者**，展示用后者。老数据没有 ``access_until`` 时回退到 ``expires_at``。
+    """
+    return func.coalesce(Team.access_until, Team.expires_at)
+
+
 class TeamService:
     """Team 管理服务类"""
 
@@ -62,6 +73,19 @@ class TeamService:
                 func.coalesce(Team.seats_default_available, 0) > 0,
             )
         )
+
+    @staticmethod
+    def _is_access_expired(team: Team, reference: Optional[datetime] = None) -> bool:
+        """Team 的权益是否已失效。
+
+        用 ``access_until``（entitlement.expires_at，订阅账期结束后仍保留的一小段
+        容错窗口）；老数据没有该值时回退到 ``expires_at``（账期本身）。
+        展示用的到期时间走 ``expires_at``，可用性判定一律走这里。
+        """
+        deadline = getattr(team, "access_until", None) or team.expires_at
+        if not deadline:
+            return False
+        return deadline < (reference or get_now())
     PLACEHOLDER_ACCOUNT_IDS = {"default", "personal", "none", "null", "me", "self"}
 
     def __init__(self):
@@ -182,7 +206,7 @@ class TeamService:
             Team.pool_type == pool_type,
             Team.status == "active",
             Team.current_members < Team.max_members,
-            or_(Team.expires_at.is_(None), Team.expires_at >= current_time),
+            or_(_access_deadline_expr().is_(None), _access_deadline_expr() >= current_time),
         ]
         self._append_warranty_seat_condition(reserve_conditions, warranty_required)
         reserve_stmt = (
@@ -206,7 +230,7 @@ class TeamService:
             if warranty_required is not None and team.warranty_seat_enabled != bool(warranty_required):
                 mode_label = "已开启质保的 Team" if warranty_required else "未开启质保的 Team"
                 return {"success": False, "error": f"当前兑换码仅可加入{mode_label}"}
-            if team.expires_at and team.expires_at < current_time:
+            if self._is_access_expired(team, current_time):
                 team.status = "expired"
                 await db_session.flush()
                 return {"success": False, "error": f"目标 Team {team_id} 已过期"}
@@ -241,7 +265,7 @@ class TeamService:
 
         if team.current_members >= team.max_members:
             team.status = "full"
-        elif team.expires_at and team.expires_at < get_now():
+        elif self._is_access_expired(team):
             team.status = "expired"
         else:
             team.status = "active"
@@ -406,7 +430,7 @@ class TeamService:
             if team.current_members >= team.max_members:
                 logger.info(f"Team {team.id} ({team.email}) 请求成功, 将状态从 error 恢复为 full")
                 team.status = "full"
-            elif team.expires_at and team.expires_at < get_now():
+            elif self._is_access_expired(team):
                 logger.info(f"Team {team.id} ({team.email}) 请求成功, 将状态从 error 恢复为 expired")
                 team.status = "expired"
             else:
@@ -516,7 +540,7 @@ class TeamService:
             effective_members = min(effective_members, team.max_members)
 
         team.current_members = effective_members
-        if team.expires_at and team.expires_at < get_now():
+        if self._is_access_expired(team):
             team.status = "expired"
         elif team.current_members >= team.max_members:
             team.status = "full"
@@ -654,7 +678,7 @@ class TeamService:
                 TeamEmailMapping.email == normalized_email,
                 TeamEmailMapping.status.in_(ACTIVE_TEAM_EMAIL_STATUSES),
                 Team.status.in_(["active", "full"]),
-                or_(Team.expires_at.is_(None), Team.expires_at >= get_now()),
+                or_(_access_deadline_expr().is_(None), _access_deadline_expr() >= get_now()),
             )
             .order_by(TeamEmailMapping.team_id.asc())
         )
@@ -1234,7 +1258,10 @@ class TeamService:
                 pending_members = len(invited_member_emails)
 
                 # 解析过期时间
+                #   expires_at   = 账期到期/续费时刻（renews_at），展示用；
+                #   access_until = 权益真正失效时刻（expires_at），可用性判定用。
                 expires_at = self._parse_remote_expires_at(selected_account.get("expires_at"))
+                access_until = self._parse_remote_expires_at(selected_account.get("period_ends_at"))
 
                 # 获取账户设置 (包含 beta_settings)
                 device_code_auth_enabled = False
@@ -1277,7 +1304,7 @@ class TeamService:
                 status = "active"
                 if current_members >= max_members:
                     status = "full"
-                elif expires_at and expires_at < get_now():
+                elif access_until and access_until < get_now():
                     status = "expired"
 
                 # 加密 AT Token
@@ -1300,6 +1327,7 @@ class TeamService:
                     plan_type=selected_account["plan_type"],
                     subscription_plan=selected_account["subscription_plan"],
                     expires_at=expires_at,
+                    access_until=access_until,
                     current_members=current_members,
                     pending_members=pending_members,
                     max_members=max_members,
@@ -1533,7 +1561,7 @@ class TeamService:
             if team.status in ["active", "full", "expired"]:
                 if team.current_members >= team.max_members:
                     team.status = "full"
-                elif team.expires_at and team.expires_at < get_now():
+                elif self._is_access_expired(team):
                     team.status = "expired"
                 else:
                     team.status = "active"
@@ -2178,7 +2206,10 @@ class TeamService:
                 }
 
             # 6. 解析过期时间
+            #    expires_at  = 账期到期/续费时刻（renews_at），与账单页一致，用于展示；
+            #    access_until = 权益真正失效时刻（expires_at），用于可用性判定。
             expires_at = self._parse_remote_expires_at(current_account.get("expires_at"))
+            access_until = self._parse_remote_expires_at(current_account.get("period_ends_at"))
 
             # 7.5 使用并发请求返回的账户设置 (包含 beta_settings)
             device_code_auth_enabled = team.device_code_auth_enabled
@@ -2209,7 +2240,7 @@ class TeamService:
             status = "active"
             if current_members >= team.max_members:
                 status = "full"
-            elif expires_at and expires_at < get_now():
+            elif access_until and access_until < get_now():
                 status = "expired"
             
             # 8. 更新 Team 信息
@@ -2219,6 +2250,7 @@ class TeamService:
             team.subscription_plan = current_account["subscription_plan"]
             team.account_role = current_account.get("account_user_role")
             team.expires_at = expires_at
+            team.access_until = access_until
             team.device_code_auth_enabled = device_code_auth_enabled
             team.error_count = 0  # 同步成功，重置错误次数
             team.last_sync = get_now()
@@ -2281,6 +2313,13 @@ class TeamService:
             for team in teams:
                 if team.status == "banned":
                     skipped += 1
+                    continue
+
+                # 账期已过（或快过）的 Team 优先同步：
+                # 订阅自动续费后 renews_at 会往后跳，不尽快同步的话它会一直挂着
+                # 过期的到期时间、被判成 expired 而停止派单，最长要等一个周期。
+                if self._is_access_expired(team, now + timedelta(days=1)):
+                    due_teams.append(team)
                     continue
 
                 base_time = team.last_sync or team.created_at
@@ -3919,16 +3958,37 @@ class TeamService:
             expired_result = await db_session.execute(expired_stmt)
             expired = expired_result.scalar() or 0
 
+            # 高级席位（prolite / Premium）：已购总数与已占用数，按池汇总
+            prolite_total_stmt = select(func.coalesce(func.sum(Team.seats_prolite_total), 0))
+            prolite_assigned_stmt = select(func.coalesce(func.sum(Team.seats_prolite_assigned), 0))
+            if pool_type:
+                prolite_total_stmt = prolite_total_stmt.where(Team.pool_type == pool_type)
+                prolite_assigned_stmt = prolite_assigned_stmt.where(Team.pool_type == pool_type)
+            prolite_total_result = await db_session.execute(prolite_total_stmt)
+            prolite_assigned_result = await db_session.execute(prolite_assigned_stmt)
+            prolite_seats_total = int(prolite_total_result.scalar() or 0)
+            prolite_seats_assigned = int(prolite_assigned_result.scalar() or 0)
+
             return {
                 "total": total,
                 "available": available,
                 "live": live,
                 "banned": banned,
                 "expired": expired,
+                "prolite_seats_total": prolite_seats_total,
+                "prolite_seats_assigned": prolite_seats_assigned,
             }
         except Exception as e:
             logger.error(f"获取 Team 统计信息失败: {e}")
-            return {"total": 0, "available": 0, "live": 0, "banned": 0, "expired": 0}
+            return {
+                "total": 0,
+                "available": 0,
+                "live": 0,
+                "banned": 0,
+                "expired": 0,
+                "prolite_seats_total": 0,
+                "prolite_seats_assigned": 0,
+            }
 
 
 # 创建全局 Team 服务实例

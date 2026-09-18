@@ -147,6 +147,11 @@ def run_auto_migration():
             cursor.execute("ALTER TABLE teams ADD COLUMN pending_members INTEGER DEFAULT 0")
             migrations_applied.append("teams.pending_members")
 
+        if not column_exists(cursor, "teams", "access_until"):
+            logger.info("添加 teams.access_until 字段")
+            cursor.execute("ALTER TABLE teams ADD COLUMN access_until DATETIME")
+            migrations_applied.append("teams.access_until")
+
         # 席位明细：按席型（default=Standard 普通 / prolite=Premium 高级）分开维护
         seat_columns = [
             ("seats_default_total", "INTEGER DEFAULT 0"),

@@ -2195,7 +2195,7 @@ class WarrantyService:
                 team = result.scalar_one_or_none()
                 
                 if team:
-                    is_expired = team.expires_at and team.expires_at < get_now()
+                    is_expired = self.team_service._is_access_expired(team)
                     if team.status in ["active", "full"] and not is_expired:
                         # --- 自愈逻辑：验证是否真的在 Team 中 ---
                         # 针对“虚假成功”导致的拉人记录残留进行清理
@@ -2264,7 +2264,7 @@ class WarrantyService:
                 
                 if team:
                     # 如果有任何一个关联 Team 还是 active/full 状态，且未过期
-                    is_expired = team.expires_at and team.expires_at < get_now()
+                    is_expired = self.team_service._is_access_expired(team)
                     if team.status in ["active", "full"] and not is_expired:
                         return {
                             "success": True,

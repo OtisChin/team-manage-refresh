@@ -784,6 +784,20 @@
             </div>
         </div>
         {% endif %}
+        <div class="stat-card stat-info">
+            <div class="stat-icon"><i data-lucide="gem"></i></div>
+            <div class="stat-info-group">
+                <div class="stat-value">{{ stats.prolite_seats_total }}</div>
+                <div class="stat-label">高级席位总数</div>
+            </div>
+        </div>
+        <div class="stat-card stat-warning">
+            <div class="stat-icon"><i data-lucide="user-check"></i></div>
+            <div class="stat-info-group">
+                <div class="stat-value">{{ stats.prolite_seats_assigned }}</div>
+                <div class="stat-label">高级席位已占</div>
+            </div>
+        </div>
     </div>
 
     <div id="batchRefreshProgress" class="batch-progress-panel" aria-live="polite" aria-atomic="true">

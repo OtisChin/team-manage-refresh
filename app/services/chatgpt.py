@@ -466,13 +466,21 @@ class ChatGPTService:
             account = info.get("account", {})
             entitlement = info.get("entitlement", {})
             if account.get("plan_type") == "team":
+                # 到期时间取 renews_at，而不是 expires_at。
+                # OpenAI 的 entitlement.expires_at 恒比 renews_at 晚 6 小时
+                # （实测两个工作区都是如此），跟账单页/续费时间对不上；
+                # renews_at 与 /subscriptions 的 active_until 完全一致，
+                # 才是当前计费周期的真实结束时刻。
+                renewal_at = entitlement.get("renews_at") or entitlement.get("expires_at", "")
                 team_accounts.append({
                     "account_id": aid,
                     "name": account.get("name", ""),
                     "plan_type": "team",
                     "account_user_role": account.get("account_user_role", ""),
                     "subscription_plan": entitlement.get("subscription_plan", ""),
-                    "expires_at": entitlement.get("expires_at", ""),
+                    "expires_at": renewal_at,
+                    "renews_at": entitlement.get("renews_at", ""),
+                    "period_ends_at": entitlement.get("expires_at", ""),
                     "has_active_subscription": entitlement.get("has_active_subscription", False)
                 })
         return {"success": True, "accounts": team_accounts, "error": None}

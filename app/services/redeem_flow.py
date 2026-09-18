@@ -503,7 +503,7 @@ class RedeemFlowService:
 
                                     if target_team.current_members >= target_team.max_members:
                                         target_team.status = "full"
-                                    elif target_team.expires_at and target_team.expires_at < get_now():
+                                    elif self.team_service._is_access_expired(target_team):
                                         target_team.status = "expired"
                                     else:
                                         target_team.status = "active"
@@ -541,7 +541,7 @@ class RedeemFlowService:
                                             seat_reserved = False
                                         if target_team.current_members >= target_team.max_members:
                                             target_team.status = "full"
-                                        elif target_team.expires_at and target_team.expires_at < get_now():
+                                        elif self.team_service._is_access_expired(target_team):
                                             target_team.status = "expired"
                                         else:
                                             target_team.status = "active"
@@ -554,7 +554,7 @@ class RedeemFlowService:
 
                                     if target_team.current_members >= target_team.max_members:
                                         target_team.status = "full"
-                                    elif target_team.expires_at and target_team.expires_at < get_now():
+                                    elif self.team_service._is_access_expired(target_team):
                                         target_team.status = "expired"
                                     else:
                                         target_team.status = "active"
@@ -595,7 +595,7 @@ class RedeemFlowService:
                                     seat_reserved = False
                                 if target_team.current_members >= target_team.max_members:
                                     target_team.status = "full"
-                                elif target_team.expires_at and target_team.expires_at < get_now():
+                                elif self.team_service._is_access_expired(target_team):
                                     target_team.status = "expired"
                                 else:
                                     target_team.status = "active"

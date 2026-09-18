@@ -59,6 +59,9 @@ class StubTeamService:
     def _append_default_seat_condition(conditions):
         return None
 
+    # 可用性判定与真实实现保持一致（access_until 优先，回退 expires_at）
+    _is_access_expired = staticmethod(TeamService._is_access_expired)
+
     @staticmethod
     def _normalize_member_email(email):
         if not email:

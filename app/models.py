@@ -25,7 +25,11 @@ class Team(Base):
     team_name = Column(String(255), comment="Team 名称")
     plan_type = Column(String(50), comment="计划类型")
     subscription_plan = Column(String(100), comment="订阅计划")
-    expires_at = Column(DateTime, comment="订阅到期时间")
+    expires_at = Column(DateTime, comment="订阅账期到期/续费时刻（entitlement.renews_at，与账单页一致，用于展示）")
+    access_until = Column(
+        DateTime,
+        comment="权益真正失效时刻（entitlement.expires_at，比账期晚若干小时），仅用于可用性判定；为空时回退 expires_at",
+    )
     current_members = Column(Integer, default=0, comment="已加入成员数（不含待接受邀请）")
     pending_members = Column(Integer, default=0, comment="待接受邀请数（不占席位，仅用于展示与排查）")
     max_members = Column(
