@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.database import AsyncSessionLocal, get_db
 from app.dependencies.auth import require_admin
-from app.services.team import TeamService
+from app.services.team import TeamService, is_timed_kick_enabled
 from app.services.redemption import RedemptionService
 from app.services.warranty import warranty_service
 from app.services.chatgpt import chatgpt_service
@@ -158,6 +158,22 @@ class TimedKickSettingsRequest(BaseModel):
         ge=0,
         le=1440,
         description="到期后的宽限时长（分钟）；宽限结束才真正踢出",
+    )
+
+
+class KickIntervalSettingsRequest(BaseModel):
+    """批量踢出间隔请求。
+
+    这一组是**共享**配置：过期兑换码、非授权成员、后台邀请过期、定时踢人
+    四种批量踢出都读它，所以不归任何一个踢人开关所有。
+    """
+    kick_interval_min_seconds: float = Field(
+        10, ge=0, le=600,
+        description="批量踢人时两次操作之间的最小随机间隔（秒）；0 表示不等待",
+    )
+    kick_interval_max_seconds: float = Field(
+        20, ge=0, le=600,
+        description="批量踢人时两次操作之间的最大随机间隔（秒）；0 表示不等待",
     )
 
 
@@ -887,6 +903,10 @@ async def team_members_list(
     try:
         # 获取成员列表
         result = await team_service.get_team_members(team_id, db)
+        # 定时踢人总开关状态随列表一起下发：子树里配置了 kick_at 却把总开关关着时，
+        # 前端必须能显示"未启用"而不是误导性的"待踢出"。
+        if isinstance(result, dict) and result.get("success"):
+            result["timed_kick_enabled"] = await is_timed_kick_enabled(db)
         return JSONResponse(content=result)
     except Exception as e:
         logger.exception("获取成员列表失败")
@@ -2423,13 +2443,13 @@ class WarrantyAutoKickSettingsRequest(BaseModel):
     enabled: bool = Field(False, description="是否启用兑换码过期自动踢人")
     interval_hours: int = Field(12, ge=1, le=168, description="检查间隔（小时）")
     renewal_reminder_days: int = Field(7, ge=1, le=30, description="距离质保结束多少天内提醒续期")
-    kick_interval_min_seconds: float = Field(
-        10, ge=0, le=600,
-        description="批量踢人时两次操作之间的最小随机间隔（秒）；0 表示不等待",
+    kick_interval_min_seconds: Optional[float] = Field(
+        None, ge=0, le=600,
+        description="兼容字段：批量踢出间隔已拆到 /settings/kick-interval；留空表示本次不改动它",
     )
-    kick_interval_max_seconds: float = Field(
-        20, ge=0, le=600,
-        description="批量踢人时两次操作之间的最大随机间隔（秒）；0 表示不等待",
+    kick_interval_max_seconds: Optional[float] = Field(
+        None, ge=0, le=600,
+        description="兼容字段：批量踢出间隔已拆到 /settings/kick-interval；留空表示本次不改动它",
     )
     usage_period_days: int = Field(
         30,
@@ -3195,12 +3215,6 @@ async def update_warranty_auto_kick_settings(
         prev_admin_inv = str(prev_admin_inv_raw).strip().lower() in ("1", "true", "yes", "on")
         new_admin_inv = bool(auto_kick_data.admin_invited_enabled)
 
-        # 批量踢人间隔：允许 0（不等待），但最小值不能大于最大值
-        kick_min_seconds = float(auto_kick_data.kick_interval_min_seconds or 0)
-        kick_max_seconds = float(auto_kick_data.kick_interval_max_seconds or 0)
-        if kick_max_seconds and kick_max_seconds < kick_min_seconds:
-            kick_min_seconds, kick_max_seconds = kick_max_seconds, kick_min_seconds
-
         settings_to_save = {
             "warranty_auto_kick_enabled": str(auto_kick_data.enabled).lower(),
             "warranty_auto_kick_interval_hours": str(auto_kick_data.interval_hours),
@@ -3209,9 +3223,20 @@ async def update_warranty_auto_kick_settings(
             "auto_kick_unauthorized_enabled": str(new_unauth).lower(),
             "auto_kick_admin_invited_enabled": str(new_admin_inv).lower(),
             "auto_kick_admin_invited_period_days": str(auto_kick_data.admin_invited_period_days),
-            "kick_interval_min_seconds": str(kick_min_seconds),
-            "kick_interval_max_seconds": str(kick_max_seconds),
         }
+
+        # 批量踢出间隔已拆成独立设置项（POST /settings/kick-interval）。这里只在
+        # 调用方仍显式传入时才写库：新版前端不再提交它们，若照旧写入，会把用户在
+        # 独立面板里改好的共享值悄悄覆盖回默认。
+        kick_min_in = auto_kick_data.kick_interval_min_seconds
+        kick_max_in = auto_kick_data.kick_interval_max_seconds
+        if kick_min_in is not None or kick_max_in is not None:
+            kick_min_seconds = float(kick_min_in if kick_min_in is not None else kick_max_in)
+            kick_max_seconds = float(kick_max_in if kick_max_in is not None else kick_min_in)
+            if kick_max_seconds < kick_min_seconds:
+                kick_min_seconds, kick_max_seconds = kick_max_seconds, kick_min_seconds
+            settings_to_save["kick_interval_min_seconds"] = str(kick_min_seconds)
+            settings_to_save["kick_interval_max_seconds"] = str(kick_max_seconds)
 
         # 关→开：写入新的启用时间戳；其它情形（保持开 / 保持关 / 开→关）不动 since。
         if new_main and not prev_main:
@@ -3340,6 +3365,52 @@ async def update_timed_kick_settings(
         })
     except Exception:
         logger.exception("更新定时踢人设置失败")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"success": False, "error": "更新失败，请稍后重试"}
+        )
+
+
+@router.post("/settings/kick-interval")
+async def update_kick_interval_settings(
+    kick_interval_data: KickIntervalSettingsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin)
+):
+    """更新批量踢出间隔。
+
+    这组值是四种批量踢出（过期兑换码 / 非授权成员 / 后台邀请过期 / 定时踢人）
+    共用的，所以独立成一项，不挂在任何一个踢人开关下面。
+    """
+    try:
+        min_seconds = float(kick_interval_data.kick_interval_min_seconds or 0)
+        max_seconds = float(kick_interval_data.kick_interval_max_seconds or 0)
+        # 允许 0（不等待）与填反，但最小值不能大于最大值
+        if max_seconds and max_seconds < min_seconds:
+            min_seconds, max_seconds = max_seconds, min_seconds
+
+        logger.info(
+            "管理员更新批量踢出间隔: min=%s, max=%s", min_seconds, max_seconds
+        )
+
+        await settings_service.update_settings(db, {
+            "kick_interval_min_seconds": str(min_seconds),
+            "kick_interval_max_seconds": str(max_seconds),
+        })
+
+        if min_seconds <= 0 and max_seconds <= 0:
+            message = "批量踢出间隔已设为不等待（一次性踢完）"
+        else:
+            message = f"批量踢出间隔已设为 {min_seconds:g}~{max_seconds:g} 秒"
+
+        return JSONResponse(content={
+            "success": True,
+            "message": message,
+            "kick_interval_min_seconds": min_seconds,
+            "kick_interval_max_seconds": max_seconds,
+        })
+    except Exception:
+        logger.exception("更新批量踢出间隔失败")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"success": False, "error": "更新失败，请稍后重试"}

@@ -895,6 +895,17 @@ eyJ..."></textarea>
                     <div class="kick-time-preview" id="timedKickPreview">
                         勾选子号后选择踢出时刻（北京时间，精确到分）
                     </div>
+
+                    <!-- 总开关关闭时显示：这里的配置不会被执行，属静默失效，必须显式提示。
+                         设置页里「自动踢人」与「定时踢人」两个面板名字相近、位置相邻，
+                         所以这里直接给锚点链接，避免管理员找错面板。 -->
+                    <div class="kick-switch-warning" id="timedKickSwitchWarning" hidden>
+                        「定时踢人」总开关未启用：此处配置的踢出时间<strong>不会被执行</strong>。
+                        注意不是「自动踢人」那个面板，请到
+                        <a href="/admin/settings#settings-timed-kick" target="_blank" rel="noopener"
+                            style="color: inherit; text-decoration: underline; font-weight: 600;">系统设置 → 定时踢人</a>
+                        勾选启用并保存。
+                    </div>
                 </div>
 
                 <!-- 已加入成员 -->

@@ -30,7 +30,9 @@
             <div class="settings-nav-group-title">自动化</div>
             <a href="#settings-refresh" class="settings-nav-pill settings-nav-link" data-target="settings-refresh">Token 预刷新</a>
             <a href="#settings-team-auto-refresh" class="settings-nav-pill settings-nav-link" data-target="settings-team-auto-refresh">Team 自动刷新</a>
-            <a href="#settings-warranty-auto-kick" class="settings-nav-pill settings-nav-link" data-target="settings-warranty-auto-kick">自动踢人</a>
+            <a href="#settings-warranty-auto-kick" class="settings-nav-pill settings-nav-link" data-target="settings-warranty-auto-kick">兑换码自动踢人</a>
+            <a href="#settings-timed-kick" class="settings-nav-pill settings-nav-link" data-target="settings-timed-kick">定时踢人</a>
+            <a href="#settings-kick-interval" class="settings-nav-pill settings-nav-link" data-target="settings-kick-interval">批量踢出间隔</a>
         </div>
         <div class="settings-nav-group">
             <div class="settings-nav-group-title">业务规则</div>
@@ -194,7 +196,7 @@
 <!-- 自动踢人配置 -->
 <div class="content-section settings-panel" id="settings-warranty-auto-kick">
     <div class="section-header">
-        <h3>自动踢人</h3>
+        <h3>兑换码自动踢人</h3>
     </div>
 
     <form id="warrantyAutoKickForm" class="settings-form">
@@ -261,28 +263,8 @@
             <p class="form-help">从"邀请发出时刻"起算，超过该期限的后台邀请会被自动踢人扫描清退。需要继续使用请重新邀请。</p>
         </div>
 
-        <hr style="margin: 16px 0; border: none; border-top: 1px solid var(--border-color, #e5e7eb);">
-
-        <div class="form-group">
-            <label>批量踢出间隔 (秒)</label>
-            <div style="display: flex; gap: 0.75rem; align-items: center;">
-                <input type="number" id="kickIntervalMinSeconds" name="kick_interval_min_seconds"
-                    value="{{ kick_interval_min_seconds or '10' }}" min="0" max="600" step="1"
-                    class="form-control" style="width: 140px;">
-                <span class="text-muted">~</span>
-                <input type="number" id="kickIntervalMaxSeconds" name="kick_interval_max_seconds"
-                    value="{{ kick_interval_max_seconds or '20' }}" min="0" max="600" step="1"
-                    class="form-control" style="width: 140px;">
-            </div>
-            <p class="form-help">
-                批量踢人时，每处理完一个账号后随机等待这个区间内的秒数再处理下一个，用于分散请求节奏、降低被风控的概率。
-                默认 10~20 秒。<strong>两个都填 0 表示不等待</strong>（一次性踢完，适合账号很少的场景）。
-                对「过期兑换码」「非授权成员」「后台邀请过期」「定时踢人」四种批量踢出都生效。
-            </p>
-        </div>
-
         <p class="form-help">该操作不可恢复，开启前请确认售后流程允许自动清退成员并销毁兑换码。</p>
-        <button type="submit" class="btn btn-primary">保存自动踢人配置</button>
+        <button type="submit" class="btn btn-primary">保存兑换码自动踢人配置</button>
     </form>
 </div>
 
@@ -322,6 +304,37 @@
 
         <p class="form-help">该操作会移除成员但其兑换码保留，可重新邀请；开启即立即执行一轮扫描。</p>
         <button type="submit" class="btn btn-primary">保存定时踢人配置</button>
+    </form>
+</div>
+
+
+<!-- 批量踢出间隔：对四种批量踢出都生效的共享配置，
+     不属于任何一个踢人开关，所以独立成面板，避免被埋在某个功能里找不到 -->
+<div class="content-section settings-panel" id="settings-kick-interval">
+    <div class="section-header">
+        <h3>批量踢出间隔</h3>
+    </div>
+
+    <form id="kickIntervalForm" class="settings-form">
+        <div class="form-group">
+            <label>两次踢出之间的随机等待 (秒)</label>
+            <div style="display: flex; gap: 0.75rem; align-items: center;">
+                <input type="number" id="kickIntervalMinSeconds" name="kick_interval_min_seconds"
+                    value="{{ kick_interval_min_seconds or '10' }}" min="0" max="600" step="1"
+                    class="form-control" style="width: 140px;">
+                <span class="text-muted">~</span>
+                <input type="number" id="kickIntervalMaxSeconds" name="kick_interval_max_seconds"
+                    value="{{ kick_interval_max_seconds or '20' }}" min="0" max="600" step="1"
+                    class="form-control" style="width: 140px;">
+            </div>
+            <p class="form-help">
+                批量踢人时，每处理完一个账号后随机等待这个区间内的秒数再处理下一个，用于分散请求节奏、降低被风控的概率。
+                默认 10~20 秒。<strong>两个都填 0 表示不等待</strong>（一次性踢完，适合账号很少的场景）。
+                对「过期兑换码」「非授权成员」「后台邀请过期」「定时踢人」四种批量踢出都生效。
+            </p>
+        </div>
+
+        <button type="submit" class="btn btn-primary">保存批量踢出间隔</button>
     </form>
 </div>
 
@@ -753,18 +766,6 @@
         const adminInvitedToggle = document.getElementById('autoKickAdminInvitedEnabled');
         const admin_invited_enabled = !!(adminInvitedToggle && adminInvitedToggle.checked);
         const admin_invited_period_days = parseInt(document.getElementById('autoKickAdminInvitedPeriodDays').value);
-        const kick_interval_min_seconds = parseFloat(document.getElementById('kickIntervalMinSeconds').value);
-        const kick_interval_max_seconds = parseFloat(document.getElementById('kickIntervalMaxSeconds').value);
-
-        if (isNaN(kick_interval_min_seconds) || kick_interval_min_seconds < 0 || kick_interval_min_seconds > 600) {
-            showToast('批量踢出最小间隔必须在 0~600 秒之间', 'error');
-            return;
-        }
-
-        if (isNaN(kick_interval_max_seconds) || kick_interval_max_seconds < 0 || kick_interval_max_seconds > 600) {
-            showToast('批量踢出最大间隔必须在 0~600 秒之间', 'error');
-            return;
-        }
 
         if (isNaN(interval_hours) || interval_hours < 1 || interval_hours > 168) {
             showToast('检查间隔必须在 1~168 小时之间', 'error');
@@ -792,13 +793,51 @@
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ enabled, interval_hours, renewal_reminder_days, usage_period_days, unauthorized_enabled, admin_invited_enabled, admin_invited_period_days, kick_interval_min_seconds, kick_interval_max_seconds })
+                body: JSON.stringify({ enabled, interval_hours, renewal_reminder_days, usage_period_days, unauthorized_enabled, admin_invited_enabled, admin_invited_period_days })
             });
 
             const data = await response.json();
 
             if (response.ok && data.success) {
                 showToast(data.message || '自动踢人配置已保存', 'success');
+            } else {
+                showToast(data.error || '保存失败', 'error');
+            }
+        } catch (error) {
+            showToast('网络错误', 'error');
+        }
+    });
+
+    // 批量踢出间隔（共享配置：四种批量踢出都读它，故独立于各踢人开关）
+    document.getElementById('kickIntervalForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const kick_interval_min_seconds = parseFloat(document.getElementById('kickIntervalMinSeconds').value);
+        const kick_interval_max_seconds = parseFloat(document.getElementById('kickIntervalMaxSeconds').value);
+
+        if (isNaN(kick_interval_min_seconds) || kick_interval_min_seconds < 0 || kick_interval_min_seconds > 600) {
+            showToast('最小间隔必须在 0~600 秒之间', 'error');
+            return;
+        }
+
+        if (isNaN(kick_interval_max_seconds) || kick_interval_max_seconds < 0 || kick_interval_max_seconds > 600) {
+            showToast('最大间隔必须在 0~600 秒之间', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('/admin/settings/kick-interval', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ kick_interval_min_seconds, kick_interval_max_seconds })
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                showToast(data.message || '批量踢出间隔已保存', 'success');
             } else {
                 showToast(data.error || '保存失败', 'error');
             }

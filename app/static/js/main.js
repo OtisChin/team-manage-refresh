@@ -1913,11 +1913,32 @@ function seatTypeBadge(seatType) {
     return '<span class="text-muted">-</span>';
 }
 
+// 「定时踢人」总开关状态，由成员列表接口随列表下发。
+// 未知时按"已启用"处理，避免接口异常时误报。
+let timedKickGloballyEnabled = true;
+
+function setTimedKickSwitchState(enabled) {
+    timedKickGloballyEnabled = enabled !== false;
+
+    const warning = document.getElementById('timedKickSwitchWarning');
+    if (warning) {
+        warning.hidden = timedKickGloballyEnabled;
+    }
+}
+
 function kickTimeCell(member) {
     if (!member.kick_at) {
         return '<span class="text-muted">不限时</span>';
     }
     const label = formatDateTime(member.kick_at);
+
+    // 总开关关着时，任何已配置的到期时间都不会被执行；此时显示"待踢出"
+    // 会让人以为后台马上会处理，必须换成明确的"未启用"。
+    if (!timedKickGloballyEnabled) {
+        return `<span class="seat-detail">${label}</span> `
+            + '<span class="seat-chip seat-chip-disabled" title="已配置踢出时间，但「定时踢人」总开关未启用，后台不会执行踢出。请到「系统设置 → 定时踢人」启用并保存。">未启用</span>';
+    }
+
     const kickAt = new Date(member.kick_at);
     if (!isNaN(kickAt.getTime()) && kickAt.getTime() <= Date.now()) {
         return `<span class="seat-detail">${label}</span> `
@@ -2321,7 +2342,13 @@ async function applyTimedKick(cancel) {
 
         if (result.success) {
             const data = result.data || {};
-            showToast(data.message || (cancel ? '已取消定时踢人' : '踢出时间已设置'), 'success');
+            if (data.warning) {
+                // 时间写库成功但不会被执行：必须让管理员看见，不能只报"成功"
+                showToast(data.warning, 'error');
+            } else {
+                showToast(data.message || (cancel ? '已取消定时踢人' : '踢出时间已设置'), 'success');
+            }
+            setTimedKickSwitchState(data.timed_kick_enabled);
             await loadModalMemberList(teamId);
         } else {
             showToast(getFriendlyAdminErrorMessage(result.error || '配置失败', 0, 'member'), 'error');
@@ -2346,6 +2373,7 @@ async function loadModalMemberList(teamId) {
     try {
         const result = await apiCall(`/admin/teams/${teamId}/members/list`);
         if (result.success) {
+            setTimedKickSwitchState(result.data.timed_kick_enabled);
             const allMembers = result.data.members || [];
             const joinedMembers = allMembers.filter(m => m.status === 'joined');
             const invitedMembers = allMembers.filter(m => m.status === 'invited');

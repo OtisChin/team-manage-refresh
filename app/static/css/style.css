@@ -966,6 +966,25 @@ body.admin-theme .toast {
     border-color: var(--success-soft);
 }
 
+/* 已配置到期时间但「定时踢人」总开关未启用：配置不会被执行，必须警示而非"待踢出" */
+.seat-chip-disabled {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border-color: var(--danger-soft);
+}
+
+/* 定时踢人总开关未启用时，在配置面板顶部给出的显式提示 */
+.kick-switch-warning {
+    margin-top: 0.55rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--danger-soft);
+    border-radius: var(--radius-sm);
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: 0.78rem;
+    line-height: 1.5;
+}
+
 .seat-breakdown-block {
     display: flex;
     flex-direction: column;

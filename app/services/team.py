@@ -33,6 +33,16 @@ ACTIVE_TEAM_EMAIL_STATUSES = (
 )
 
 
+async def is_timed_kick_enabled(db_session: AsyncSession) -> bool:
+    """定时踢人总开关（``settings.timed_kick_enabled``）是否启用。
+
+    子号上配置的 ``kick_at`` 只是"到期时间"，真正执行踢出的是受该总开关控制的
+    后台任务；开关关闭时配置会被静默忽略，所以调用方必须能读到这个状态。
+    """
+    raw = await settings_service.get_setting(db_session, "timed_kick_enabled", "false")
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _access_deadline_expr():
     """SQL 表达式：Team 权益真正失效的时刻。
 
@@ -3335,6 +3345,16 @@ class TeamService:
 
             await db_session.commit()
 
+            # 配置了到期时间却把总开关关着，后台任务根本不会跑；这里显式回告，
+            # 前端据此提示管理员，避免"配了却永远不踢"的静默失效。
+            timed_kick_on = await is_timed_kick_enabled(db_session)
+            warning = None
+            if target_kick_at and not timed_kick_on:
+                warning = (
+                    "定时踢人总开关未启用，该踢出时间不会被执行；"
+                    "请到「系统设置 → 定时踢人」勾选启用并保存。"
+                )
+
             if target_kick_at:
                 action = f"踢出时间已设为 {target_kick_at.strftime('%Y-%m-%d %H:%M')}（北京时间）"
             else:
@@ -3345,6 +3365,8 @@ class TeamService:
                 "updated": updated,
                 "kick_hours": derived_hours if target_kick_at else None,
                 "kick_at": self._to_aware_isoformat(target_kick_at),
+                "timed_kick_enabled": timed_kick_on,
+                "warning": warning,
                 "results": results,
                 "error": None if updated > 0 else "没有子号被更新",
             }
