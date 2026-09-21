@@ -1730,6 +1730,55 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
     async def _noop_reset(*args, **kwargs):
         return None
 
+    async def test_add_team_members_reuses_one_sync_for_all_emails(self):
+        """批量邀请只应在开头同步一次，并把成员快照透传给每个邮箱。
+
+        线上踩过的坑：add_team_member 内部会再同步一遍 Team（实测 5 个请求、
+        约 5 秒），批量邀请 N 个邮箱就白白多花 N 倍时间。
+        """
+        await self._seed_team(current_members=1, max_members=5)
+        team_service = TeamService()
+        sync_calls = []
+        snapshots = []
+
+        async def stub_sync(team_id, db_session, force_refresh=False):
+            sync_calls.append(team_id)
+            return {
+                "success": True,
+                "message": "同步成功",
+                "member_emails": ["existing@example.com"],
+                "error": None,
+            }
+
+        async def stub_add_member(team_id, email, db_session, seat_type="default",
+                                  member_emails_snapshot=None):
+            snapshots.append(member_emails_snapshot)
+            return {
+                "success": True,
+                "message": f"邀请已发送到 {email}",
+                "error": None,
+                "status": "invited",
+                "email": email,
+            }
+
+        async with self.session_factory() as session:
+            with patch.object(team_service, "sync_team_info", new=stub_sync), \
+                 patch.object(team_service, "add_team_member", new=stub_add_member):
+                result = await team_service.add_team_members(
+                    101,
+                    ["a@example.com", "b@example.com", "c@example.com"],
+                    session,
+                )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["summary"]["invited"], 3)
+        # 三个邮箱只触发一次同步，而不是每个邮箱各同步一次
+        self.assertEqual(sync_calls, [101])
+        # 快照必须透传，否则 add_team_member 会退回内部同步
+        self.assertEqual(len(snapshots), 3)
+        for snapshot in snapshots:
+            self.assertIn("existing@example.com", snapshot)
+
     async def test_add_team_members_filters_invalid_duplicate_and_existing(self):
         await self._seed_team(current_members=1, max_members=5)
         team_service = TeamService()
@@ -1743,7 +1792,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
                 "error": None,
             }
 
-        async def stub_add_member(team_id, email, db_session, seat_type="default"):
+        async def stub_add_member(team_id, email, db_session, seat_type="default", **kwargs):
             return {
                 "success": True,
                 "message": f"邀请已发送到 {email}",
@@ -1791,7 +1840,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
                 "error": None,
             }
 
-        async def stub_add_member(team_id, email, db_session, seat_type="default"):
+        async def stub_add_member(team_id, email, db_session, seat_type="default", **kwargs):
             add_member_calls.append(email)
             return {
                 "success": True,
@@ -2038,7 +2087,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
                 "error": None,
             }
 
-        async def stub_add_member(team_id, email, db_session, seat_type="default"):
+        async def stub_add_member(team_id, email, db_session, seat_type="default", **kwargs):
             invited_calls.append(email)
             if email == "fatal@example.com":
                 return {

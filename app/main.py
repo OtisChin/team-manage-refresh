@@ -447,21 +447,24 @@ async def scheduled_timed_member_kick():
                 return
             if stats.get("success"):
                 logger.info(
-                    "定时踢人完成: scanned=%s kicked=%s skipped=%s failed=%s grace=%smin",
+                    "定时踢人完成: scanned=%s kicked=%s skipped=%s blocked=%s failed=%s grace=%smin",
                     stats.get("scanned", 0),
                     stats.get("kicked", 0),
                     stats.get("skipped", 0),
+                    stats.get("blocked", 0),
                     stats.get("failed", 0),
                     stats.get("grace_minutes"),
                 )
             else:
                 logger.warning(
-                    "定时踢人部分失败: scanned=%s kicked=%s skipped=%s failed=%s error=%s",
+                    "定时踢人部分失败: scanned=%s kicked=%s skipped=%s blocked=%s failed=%s error=%s failures=%s",
                     stats.get("scanned", 0),
                     stats.get("kicked", 0),
                     stats.get("skipped", 0),
+                    stats.get("blocked", 0),
                     stats.get("failed", 0),
                     stats.get("error"),
+                    stats.get("failures"),
                 )
     except Exception as e:
         logger.error(f"定时踢人任务执行失败: {e}")

@@ -38,7 +38,37 @@ MAX_KICK_INTERVAL_SECONDS = 600
 KICK_INTERVAL_SETTING_MIN = "kick_interval_min_seconds"
 KICK_INTERVAL_SETTING_MAX = "kick_interval_max_seconds"
 
+# 这些状态的 Team 连读成员列表都会 401/风控失败，定时踢人必然打不出去。
+# 继续逐个发请求只会把队列堵死（每个候选白白耗掉一轮随机等待），
+# 所以直接判定为 blocked 跳过；Team 状态恢复后下一轮会自动重新参与。
+UNAVAILABLE_TEAM_STATUSES = frozenset({"error", "expired", "banned"})
+
 logger = logging.getLogger(__name__)
+
+
+class _BatchKickPacer:
+    """批量踢出时的错峰节奏控制。
+
+    服务端对同一工作区的连续成员变更敏感，所以同一个 Team 内接连踢人时要按
+    配置区间随机等待。但换 Team、或本轮压根没向 Team 端发请求的候选之间不需要
+    等待：无脑等待只会让一批账号互相排队，把排在后面的到期子号越推越晚。
+    """
+
+    # 真正向 Team 端发过请求、需要错峰的类别
+    _REQUEST_CATEGORIES = frozenset({"kicked", "failed", "destroyed"})
+
+    def __init__(self) -> None:
+        self._last_request_team_id: Optional[int] = None
+
+    def observe(self, team_id: Optional[int], category: Optional[str]) -> None:
+        """记录一个候选的处理结果，决定是否需要为下一个候选等待。"""
+        self._last_request_team_id = (
+            team_id if category in self._REQUEST_CATEGORIES else None
+        )
+
+    def should_wait(self, team_id: Optional[int]) -> bool:
+        return team_id is not None and team_id == self._last_request_team_id
+
 
 # 全局频率限制字典: {(type, key): last_time}
 # type: 'email' or 'code'
@@ -1155,12 +1185,16 @@ class WarrantyService:
         failed = 0
         dismissed_renewal_requests = 0
 
-        for index, candidate in enumerate(candidates):
-            if index > 0:
+        pacer = _BatchKickPacer()
+
+        for candidate in candidates:
+            team_id = candidate.get("team_id")
+            if pacer.should_wait(team_id):
                 await self._sleep_between_kicks(db_session)
             item_result = await self.kick_and_destroy_expired_warranty_code(db_session, candidate.get("code", ""))
             results.append(item_result)
             category = item_result.get("category")
+            pacer.observe(team_id, category)
             if category == "destroyed":
                 destroyed += 1
                 dismissed_renewal_requests += int(item_result.get("dismissed_renewal_requests", 0) or 0)
@@ -1465,16 +1499,20 @@ class WarrantyService:
         skipped = 0
         failed = 0
 
-        for index, candidate in enumerate(candidates):
-            if index > 0:
+        pacer = _BatchKickPacer()
+
+        for candidate in candidates:
+            team_id = candidate.get("team_id")
+            if pacer.should_wait(team_id):
                 await self._sleep_between_kicks(db_session)
             item_result = await self.kick_unauthorized_team_member(
                 db_session,
-                candidate.get("team_id"),
+                team_id,
                 candidate.get("email", ""),
             )
             results.append(item_result)
             category = item_result.get("category")
+            pacer.observe(team_id, category)
             if category == "kicked":
                 kicked += 1
             elif category == "skipped":
@@ -1765,16 +1803,20 @@ class WarrantyService:
         skipped = 0
         failed = 0
 
-        for index, candidate in enumerate(candidates):
-            if index > 0:
+        pacer = _BatchKickPacer()
+
+        for candidate in candidates:
+            team_id = candidate.get("team_id")
+            if pacer.should_wait(team_id):
                 await self._sleep_between_kicks(db_session)
             item_result = await self.kick_admin_invited_expired_member(
                 db_session,
-                candidate.get("team_id"),
+                team_id,
                 candidate.get("email", ""),
             )
             results.append(item_result)
             category = item_result.get("category")
+            pacer.observe(team_id, category)
             if category == "kicked":
                 kicked += 1
             elif category == "skipped":
@@ -1998,8 +2040,22 @@ class WarrantyService:
                     "error": None,
                 }
 
-            # 车主兜底
+            # Team 不可用时（token 失效/被封）连读成员列表都会失败，
+            # 逐个发请求只会把整轮队列拖长，真正的到期子号反而排在后面踢不到。
             team = await db_session.get(Team, team_id)
+            if team:
+                team_status = (team.status or "").strip().lower()
+                if team_status in UNAVAILABLE_TEAM_STATUSES:
+                    return {
+                        "success": True,
+                        "team_id": team_id,
+                        "email": normalized_email,
+                        "category": "blocked",
+                        "skip_reason": f"team_{team_status}",
+                        "error": None,
+                    }
+
+            # 车主兜底
             if team:
                 owner_email = self.team_service._normalize_member_email(team.email)
                 if owner_email and owner_email == normalized_email:
@@ -2064,7 +2120,9 @@ class WarrantyService:
                 "scanned": 0,
                 "kicked": 0,
                 "skipped": 0,
+                "blocked": 0,
                 "failed": 0,
+                "failures": [],
                 "results": [],
                 "error": scan_result.get("error") or "扫描失败",
             }
@@ -2075,7 +2133,9 @@ class WarrantyService:
                 "scanned": 0,
                 "kicked": 0,
                 "skipped": 0,
+                "blocked": 0,
                 "failed": 0,
+                "failures": [],
                 "results": [],
                 "error": None,
             }
@@ -2084,24 +2144,54 @@ class WarrantyService:
         results: List[Dict[str, Any]] = []
         kicked = 0
         skipped = 0
+        blocked = 0
         failed = 0
+        blocked_team_ids: set = set()
+        pacer = _BatchKickPacer()
 
-        for index, candidate in enumerate(candidates):
-            if index > 0:
+        for candidate in candidates:
+            team_id = candidate.get("team_id")
+            if pacer.should_wait(team_id):
                 await self._sleep_between_kicks(db_session)
+
             item_result = await self.kick_timed_member(
                 db_session,
-                candidate.get("team_id"),
+                team_id,
                 candidate.get("email", ""),
             )
             results.append(item_result)
             category = item_result.get("category")
+            pacer.observe(team_id, category)
             if category == "kicked":
                 kicked += 1
             elif category == "skipped":
                 skipped += 1
+            elif category == "blocked":
+                blocked += 1
+                if team_id is not None:
+                    blocked_team_ids.add(team_id)
             else:
                 failed += 1
+
+        if blocked:
+            logger.warning(
+                "定时踢人：%s 个到期子号因所在 Team 不可用被跳过（team_ids=%s），"
+                "这些子号本轮踢不掉，请先处理对应 Team 的登录状态",
+                blocked,
+                sorted(blocked_team_ids),
+            )
+
+        # 失败原因以前只汇总成一句"部分到期子号处理失败"，出问题时无从定位；
+        # 这里带上前几条样本，交给调用方写日志。
+        failures = [
+            {
+                "team_id": item.get("team_id"),
+                "email": item.get("email"),
+                "error": item.get("error"),
+            }
+            for item in results
+            if item.get("category") not in ("kicked", "skipped", "blocked")
+        ][:5]
 
         return {
             "success": failed == 0,
@@ -2110,7 +2200,9 @@ class WarrantyService:
             "scanned": len(candidates),
             "kicked": kicked,
             "skipped": skipped,
+            "blocked": blocked,
             "failed": failed,
+            "failures": failures,
             "results": results,
             "error": None if failed == 0 else "部分到期子号处理失败",
         }

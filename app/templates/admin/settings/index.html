@@ -292,7 +292,11 @@
             <label for="timedKickGraceMinutes">到期宽限 (分钟)</label>
             <input type="number" id="timedKickGraceMinutes" name="grace_minutes"
                 value="{{ timed_kick_grace_minutes or '5' }}" min="0" max="1440" class="form-control">
-            <p class="form-help">到期后先等这么久再踢出，给用户留缓冲。默认 5 分钟；填 0 表示到点立即踢。</p>
+            <p class="form-help">
+                到期后先等这么久才进入踢出队列，给用户留缓冲。默认 5 分钟；填 0 表示到点即进队列。
+                这是<strong>最早可踢时间</strong>，不是实际踢出时间：实际还要等下一轮扫描，
+                且同一个 Team 内多个子号会按「批量踢出间隔」逐个错峰处理，排得越靠后越晚。
+            </p>
         </div>
 
         <div class="form-group">
@@ -330,6 +334,8 @@
             <p class="form-help">
                 批量踢人时，每处理完一个账号后随机等待这个区间内的秒数再处理下一个，用于分散请求节奏、降低被风控的概率。
                 默认 10~20 秒。<strong>两个都填 0 表示不等待</strong>（一次性踢完，适合账号很少的场景）。
+                等待只发生在<strong>同一个 Team 内的连续踢出</strong>之间：换 Team、或被跳过的账号都不占用等待，
+                避免一批账号排队把后面的到期子号越推越晚。
                 对「过期兑换码」「非授权成员」「后台邀请过期」「定时踢人」四种批量踢出都生效。
             </p>
         </div>

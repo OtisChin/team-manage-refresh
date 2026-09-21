@@ -5,7 +5,7 @@ Team 管理服务
 import logging
 import json
 import asyncio
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 from datetime import datetime, timedelta
 import pytz
 from sqlalchemy import select, update, delete, func, or_, case
@@ -2741,6 +2741,7 @@ class TeamService:
         email: str,
         db_session: AsyncSession,
         seat_type: str = ChatGPTService.SEAT_TYPE_DEFAULT,
+        member_emails_snapshot: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
         """
         添加 Team 成员
@@ -2750,6 +2751,8 @@ class TeamService:
             email: 成员邮箱
             db_session: 数据库会话
             seat_type: 目标席型 (default=普通席位 / prolite=高级席位)
+            member_emails_snapshot: 调用方已拿到的成员邮箱快照；传入即跳过
+                本方法内部的 Team 同步，供批量邀请复用，避免每个邮箱重复同步
 
         Returns:
             结果字典,包含 success, message, error
@@ -2794,18 +2797,24 @@ class TeamService:
                     "该 Team 的登录凭证已过期，且自动刷新失败，请重新登录或重新导入",
                 )
 
-            sync_result = await self.sync_team_info(team_id, db_session)
-            if not sync_result.get("success"):
-                return self._admin_error(
-                    "team_sync_failed",
-                    sync_result.get("error") or "拉取 Team 最新成员状态失败，请稍后重试",
-                )
+            if member_emails_snapshot is None:
+                sync_result = await self.sync_team_info(team_id, db_session)
+                if not sync_result.get("success"):
+                    return self._admin_error(
+                        "team_sync_failed",
+                        sync_result.get("error") or "拉取 Team 最新成员状态失败，请稍后重试",
+                    )
 
-            member_emails = {
-                self._normalize_member_email(item)
-                for item in sync_result.get("member_emails", [])
-                if self._normalize_member_email(item)
-            }
+                member_emails = {
+                    self._normalize_member_email(item)
+                    for item in sync_result.get("member_emails", [])
+                    if self._normalize_member_email(item)
+                }
+            else:
+                # 批量邀请的调用方已经在开头同步过一次，并会随循环维护这份快照。
+                # 这里再同步一次要为一个邮箱多打 5 个请求（实测约 5 秒），
+                # 是批量邀请慢的主要原因，所以允许复用调用方的快照。
+                member_emails = member_emails_snapshot
             if normalized_email in member_emails:
                 return {
                     "success": True,
@@ -3167,7 +3176,13 @@ class TeamService:
                 continue
 
             item_result = await self.add_team_member(
-                team_id, normalized_email, db_session, seat_type=normalized_seat_type
+                team_id,
+                normalized_email,
+                db_session,
+                seat_type=normalized_seat_type,
+                # 开头已经同步过一次，循环里维护快照即可；
+                # 否则每个邮箱都要再拉一遍全量成员（实测约 5 秒）。
+                member_emails_snapshot=existing_emails,
             )
             item_status = item_result.get("status") or ("invited" if item_result.get("success") else "failed")
             item_message = item_result.get("message")
@@ -3192,6 +3207,10 @@ class TeamService:
                 "message": item_message,
                 "error": item_error,
             })
+
+            # 邀请已下发（或本来就在），把邮箱并入快照，后面的重复判断不必再回源
+            if item_result.get("success"):
+                existing_emails.add(normalized_email)
 
             if item_result.get("error_code") in fatal_error_codes:
                 stop_processing = True

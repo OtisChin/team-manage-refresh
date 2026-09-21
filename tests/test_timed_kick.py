@@ -71,6 +71,70 @@ class _TimedKickBase(unittest.IsolatedAsyncioTestCase):
             )
             return result.scalar_one_or_none()
 
+    async def _add_team(self, team_id, status="active"):
+        async with self.session_factory() as session:
+            session.add(Team(
+                id=team_id,
+                email=f"owner{team_id}@example.com",
+                access_token_encrypted="token",
+                account_id=f"acct-{team_id}",
+                team_name=f"Team{team_id}",
+                current_members=2,
+                max_members=5,
+                status=status,
+                pool_type="normal",
+            ))
+            await session.commit()
+
+    async def _set_team_status(self, team_id, status):
+        async with self.session_factory() as session:
+            team = await session.get(Team, team_id)
+            team.status = status
+            await session.commit()
+
+    async def _seed_due(self, team_id, count):
+        async with self.session_factory() as session:
+            for index in range(count):
+                session.add(TeamEmailMapping(
+                    team_id=team_id,
+                    email=f"t{team_id}due{index}@example.com",
+                    status="joined",
+                    source="sync",
+                    kick_at=get_now() - timedelta(hours=1),
+                    kick_hours=2,
+                ))
+            await session.commit()
+
+    @staticmethod
+    def _record_sleeps():
+        delays = []
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(seconds):
+            delays.append(seconds)
+            await real_sleep(0)
+
+        return delays, fake_sleep
+
+    async def _run_with_settings(self, extra_settings):
+        self.warranty.team_service = self.team_service
+        async with self.session_factory() as session:
+            await settings_service.update_settings(session, {
+                "timed_kick_enabled": "true",
+                "timed_kick_grace_minutes": "5",
+                **extra_settings,
+            })
+
+        delays, fake_sleep = self._record_sleeps()
+        with patch.object(
+            self.team_service,
+            "remove_invite_or_member",
+            new=AsyncMock(return_value={"success": True, "message": "ok"}),
+        ), patch("app.services.warranty.asyncio.sleep", new=fake_sleep):
+            async with self.session_factory() as session:
+                stats = await self.warranty.run_timed_member_auto_kick(session)
+        return stats, delays
+
 
 class ParseKickAtTests(unittest.TestCase):
     """前端传的是北京时间字符串，后端按 settings.timezone 解释。"""
@@ -407,53 +471,10 @@ class TimedKickExecutionTests(_TimedKickBase):
 
 
 class BatchKickIntervalTests(_TimedKickBase):
-    """批量踢出时，每两个账号之间要按配置区间随机等待，避免高频请求被风控。"""
-
-    async def _seed_due(self, count):
-        async with self.session_factory() as session:
-            for index in range(count):
-                session.add(TeamEmailMapping(
-                    team_id=301,
-                    email=f"due{index}@example.com",
-                    status="joined",
-                    source="sync",
-                    kick_at=get_now() - timedelta(hours=1),
-                    kick_hours=2,
-                ))
-            await session.commit()
-
-    @staticmethod
-    def _record_sleeps():
-        delays = []
-        real_sleep = asyncio.sleep
-
-        async def fake_sleep(seconds):
-            delays.append(seconds)
-            await real_sleep(0)
-
-        return delays, fake_sleep
-
-    async def _run_with_settings(self, extra_settings):
-        self.warranty.team_service = self.team_service
-        async with self.session_factory() as session:
-            await settings_service.update_settings(session, {
-                "timed_kick_enabled": "true",
-                "timed_kick_grace_minutes": "5",
-                **extra_settings,
-            })
-
-        delays, fake_sleep = self._record_sleeps()
-        with patch.object(
-            self.team_service,
-            "remove_invite_or_member",
-            new=AsyncMock(return_value={"success": True, "message": "ok"}),
-        ), patch("app.services.warranty.asyncio.sleep", new=fake_sleep):
-            async with self.session_factory() as session:
-                stats = await self.warranty.run_timed_member_auto_kick(session)
-        return stats, delays
+    """批量踢出时，同一 Team 内每两个账号之间要按配置区间随机等待，避免被风控。"""
 
     async def test_waits_random_interval_between_accounts(self):
-        await self._seed_due(3)
+        await self._seed_due(301, 3)
 
         stats, delays = await self._run_with_settings({
             "kick_interval_min_seconds": "10",
@@ -468,7 +489,7 @@ class BatchKickIntervalTests(_TimedKickBase):
             self.assertLessEqual(delay, 20)
 
     async def test_zero_interval_disables_waiting(self):
-        await self._seed_due(3)
+        await self._seed_due(301, 3)
 
         stats, delays = await self._run_with_settings({
             "kick_interval_min_seconds": "0",
@@ -493,6 +514,80 @@ class BatchKickIntervalTests(_TimedKickBase):
             min_seconds, max_seconds = await self.warranty.get_kick_interval_range(session)
 
         self.assertEqual((min_seconds, max_seconds), (10.0, 20.0))
+
+
+class TeamUnavailableKickTests(_TimedKickBase):
+    """Team 登录失效时，候选必须被短路跳过。
+
+    这是线上踩过的坑：26 个到期子号挂在一个 token 已失效的 Team 上，
+    每轮都逐个发请求 + 逐次随机等待，整轮拖到 7 分钟，导致同一时刻真正
+    能踢的子号被挤到十几分钟后才轮到。
+    """
+
+    async def test_unavailable_team_candidate_is_blocked_without_request(self):
+        await self._seed_due(301, 2)
+        await self._set_team_status(301, "error")
+
+        async with self.session_factory() as session:
+            await settings_service.update_settings(session, {
+                "timed_kick_enabled": "true",
+                "timed_kick_grace_minutes": "5",
+            })
+
+        self.warranty.team_service = self.team_service
+        remove_mock = AsyncMock(return_value={"success": True, "message": "ok"})
+        delays, fake_sleep = self._record_sleeps()
+        with patch.object(
+            self.team_service, "remove_invite_or_member", new=remove_mock
+        ), patch("app.services.warranty.asyncio.sleep", new=fake_sleep):
+            async with self.session_factory() as session:
+                stats = await self.warranty.run_timed_member_auto_kick(session)
+
+        self.assertEqual(stats["blocked"], 2)
+        self.assertEqual(stats["failed"], 0)
+        self.assertEqual(stats["kicked"], 0)
+        self.assertTrue(stats["success"])
+        remove_mock.assert_not_awaited()
+        # 被跳过的候选不占用错峰等待
+        self.assertEqual(delays, [])
+
+    async def test_expired_team_is_blocked_too(self):
+        await self._seed_due(301, 1)
+        await self._set_team_status(301, "expired")
+
+        async with self.session_factory() as session:
+            item = await self.warranty.kick_timed_member(session, 301, "t301due0@example.com")
+
+        self.assertEqual(item["category"], "blocked")
+        self.assertEqual(item["skip_reason"], "team_expired")
+
+    async def test_blocked_team_does_not_hold_up_healthy_team(self):
+        """坏 Team 排在前面时，好 Team 的到期子号必须当轮就踢掉，且不产生等待。"""
+        await self._add_team(302, status="active")
+        await self._seed_due(301, 2)
+        await self._seed_due(302, 1)
+        await self._set_team_status(301, "error")
+
+        stats, delays = await self._run_with_settings({})
+
+        self.assertEqual(stats["blocked"], 2)
+        self.assertEqual(stats["kicked"], 1)
+        self.assertEqual(delays, [])
+
+    async def test_waiting_only_happens_inside_same_team(self):
+        """跨 Team 的两次请求不需要错峰，只有同一工作区连续变更才需要。"""
+        await self._add_team(302, status="active")
+        await self._seed_due(301, 2)
+        await self._seed_due(302, 2)
+
+        stats, delays = await self._run_with_settings({
+            "kick_interval_min_seconds": "10",
+            "kick_interval_max_seconds": "20",
+        })
+
+        self.assertEqual(stats["kicked"], 4)
+        # 每个 Team 内部各等待 1 次，跨 Team 边界不等待
+        self.assertEqual(len(delays), 2)
 
 
 class KickTimeFormattingTests(unittest.TestCase):
