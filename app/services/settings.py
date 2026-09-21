@@ -29,10 +29,14 @@ VALID_UI_THEMES = {
 
 UI_STYLE_CARTOON = "cartoon"
 UI_STYLE_CLASSIC = "classic"
-DEFAULT_UI_STYLE = UI_STYLE_CARTOON
+# 简约（黑白极简）：忽略配色主题，强制走中性灰阶调色板。
+UI_STYLE_MINIMAL = "minimal"
+# 默认风格：简约（黑白极简）
+DEFAULT_UI_STYLE = UI_STYLE_MINIMAL
 VALID_UI_STYLES = {
     UI_STYLE_CARTOON,
     UI_STYLE_CLASSIC,
+    UI_STYLE_MINIMAL,
 }
 
 
@@ -101,7 +105,7 @@ class SettingsService:
 
     @staticmethod
     def normalize_ui_style(style: Optional[str]) -> str:
-        """规范化界面风格（cartoon / classic）。"""
+        """规范化界面风格（cartoon / classic / minimal）。"""
         normalized = str(style or "").strip().lower()
         if normalized in VALID_UI_STYLES:
             return normalized

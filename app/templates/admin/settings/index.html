@@ -422,7 +422,7 @@
     <form id="uiStyleForm" class="settings-form">
         <div class="form-group">
             <label>选择界面风格</label>
-            <p class="form-help">切换卡通风格（Neobrutalism）与经典简约风格，配色方案（冷调/暖调）保持独立。</p>
+            <p class="form-help">切换卡通风格（Neobrutalism）与经典简约风格，配色方案（冷调/暖调）保持独立。简约风格为黑白极简外观，自带中性灰阶调色板，不受配色方案影响。</p>
             <div class="theme-options">
                 <label class="theme-option-card" for="uiStyleCartoon">
                     <input type="radio" id="uiStyleCartoon" name="ui_style" value="cartoon" {% if ui_style == 'cartoon' %}checked{% endif %}>
@@ -436,6 +436,13 @@
                     <span>
                         <strong>经典风格</strong>
                         <small>简洁专业的工作台风格，无装饰贴纸，适合长时间高效运营。</small>
+                    </span>
+                </label>
+                <label class="theme-option-card" for="uiStyleMinimal">
+                    <input type="radio" id="uiStyleMinimal" name="ui_style" value="minimal" {% if ui_style == 'minimal' %}checked{% endif %}>
+                    <span>
+                        <strong>简约风格</strong>
+                        <small>黑白极简（shadcn/ui 中性色系）：纯黑白灰、1px 细边框、零阴影，聚焦内容本身。</small>
                     </span>
                 </label>
             </div>
@@ -454,6 +461,7 @@
     <form id="uiThemeForm" class="settings-form">
         <div class="form-group">
             <label>当前配色方案</label>
+            <p class="form-help">仅在卡通 / 经典风格下生效；简约风格使用固定黑白灰阶。</p>
             <div class="theme-options">
                 <label class="theme-option-card" for="uiThemeOcean">
                     <input type="radio" id="uiThemeOcean" name="theme" value="ocean" {% if ui_theme == 'ocean' %}checked{% endif %}>

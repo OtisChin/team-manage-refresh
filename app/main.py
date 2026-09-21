@@ -674,7 +674,7 @@ app.include_router(api.router)
 async def login_page(request: Request):
     """登录页面"""
     ui_theme = "ocean"
-    ui_style = "cartoon"
+    ui_style = "minimal"
     try:
         from app.services.settings import settings_service, DEFAULT_UI_THEME, DEFAULT_UI_STYLE
         async with AsyncSessionLocal() as db:
@@ -686,7 +686,7 @@ async def login_page(request: Request):
             )
     except Exception:
         ui_theme = "ocean"
-        ui_style = "cartoon"
+        ui_style = "minimal"
     return templates.TemplateResponse(
         request,
         "auth/login.html",

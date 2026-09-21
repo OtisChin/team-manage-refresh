@@ -2494,7 +2494,7 @@ class UiThemeSettingsRequest(BaseModel):
 
 class UiStyleSettingsRequest(BaseModel):
     """界面风格设置请求"""
-    style: Literal["cartoon", "classic"] = Field(DEFAULT_UI_STYLE, description="界面风格")
+    style: Literal["cartoon", "classic", "minimal"] = Field(DEFAULT_UI_STYLE, description="界面风格")
 
 
 class AdminProfileRequest(BaseModel):

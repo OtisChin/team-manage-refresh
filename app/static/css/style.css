@@ -7097,3 +7097,1481 @@ body.style-classic .btn {
         font-size: 0.78rem;
     }
 }
+
+/* ================================================================
+   ████  MINIMAL · 黑白极简风格（shadcn/ui neutral 语言）  ████
+   作用范围：body.admin-theme.style-minimal（工作台 / 各工作区 / 登录页）
+   设计原则：
+     - 纯黑白灰阶，仅 destructive（删除/报错）保留一点红
+     - 1px 细边框取代粗描边，极轻阴影取代实色偏移阴影
+     - 位移 / 旋转类装饰动效全部关闭，反馈只靠底色与边框变化
+     - 卡通贴纸、吉祥物、点阵纹理、光晕一律隐藏
+     - 配色主题（冷调 / 暖调）在该风格下不参与渲染
+   实现方式：本段位于文件末尾，用更高特异性覆盖上面的卡通 overlay，
+   不改模板结构与 JS 业务逻辑。
+   ================================================================ */
+
+/* ----- 中性调色板 + 结构 token ----- */
+body.admin-theme.style-minimal,
+html.style-minimal body.admin-theme {
+    --ca-ink:           #0a0a0a;
+    --ca-ink-soft:      #525252;
+    --ca-ink-muted:     #a3a3a3;
+
+    --ca-paper:         #ffffff;
+    --ca-paper-2:       #fafafa;
+    --ca-cream:         #f5f5f5;
+    --ca-surface:       #ffffff;
+    --ca-surface-soft:  #fafafa;
+
+    /* 强调色照搬 shadcn/ui v4 neutral：主色 neutral-900，
+       状态色用站点实际引用的 emerald-600 / amber-700 / sky-700，
+       只出现在状态点、开启标记这类小面积提示上 */
+    --ca-primary:       #171717;
+    --ca-primary-2:     #262626;
+    --ca-secondary:     #e40014;
+    --ca-success:       #009767;
+    --ca-info:          #0069a4;
+    --ca-pink:          #737373;
+    --ca-accent:        #262626;
+    --ca-warning:       #b75000;
+    --ca-danger:        #e40014;
+
+    /* 边框：站点卡片用 ring-1 ring-foreground/5，等价于 6% 黑细线 */
+    --ca-border:        1px solid #e5e5e5;
+    --ca-border-thick:  1px solid #e5e5e5;
+    --ca-border-thin:   1px solid rgba(10, 10, 10, 0.06);
+    --ca-border-card:   1px solid rgba(10, 10, 10, 0.06);
+
+    --ca-shadow-xs:     0 1px 2px rgba(10, 10, 10, 0.04);
+    --ca-shadow-sm:     0 1px 3px rgba(10, 10, 10, 0.05);
+    --ca-shadow-md:     0 1px 3px rgba(10, 10, 10, 0.06);
+    --ca-shadow-lg:     0 24px 80px -48px #0a0a0a;
+
+    /* 圆角照搬 --radius: .625rem 的倍数关系 */
+    --ca-r-sm:          6px;   /* radius × 0.6 */
+    --ca-r-md:          8px;   /* radius × 0.8 */
+    --ca-r-lg:          10px;  /* radius */
+    --ca-r-xl:          14px;  /* radius × 1.4 */
+    --ca-r-card:        16px;  /* 卡片：站点为 min(--radius-4xl, 24px)，此处折中 */
+    --ca-r-pill:        999px;
+
+    --ca-tx:            140ms cubic-bezier(0.4, 0, 0.2, 1);
+    --ca-bounce:        140ms cubic-bezier(0.4, 0, 0.2, 1);
+
+    /* 远程兼容：让既有 --primary / --border-base 等也走中性色 */
+    --primary:          #171717;
+    --primary-hover:    #262626;
+    --primary-soft:     #f5f5f5;
+    --bg-main:          #ffffff;
+    --bg-surface:       #ffffff;
+    --bg-muted:         #f5f5f5;
+    --surface-elev-1:   #ffffff;
+    --text-main:        #0a0a0a;
+    --text-muted:       #737373;
+    --text-dim:         #a1a1a1;
+    --border-base:      #e5e5e5;
+    --border-main:      #e5e5e5;
+    --border-focus:     #a1a1a1;
+    --focus-ring:       rgba(161, 161, 161, 0.3);
+    --shadow-sm:        0 1px 3px rgba(10, 10, 10, 0.05);
+    --shadow-md:        0 1px 3px rgba(10, 10, 10, 0.06);
+    --shadow-lg:        0 24px 80px -48px #0a0a0a;
+    --radius-sm:        6px;
+    --radius-md:        8px;
+    --radius-lg:        10px;
+    --table-row-hover:  #fafafa;
+    --table-header-bg:  #ffffff;
+    --table-header-text: #737373;
+    --toast-bg:         #ffffff;
+    --toast-border:     #e5e5e5;
+    --secondary-button-bg:        #ffffff;
+    --secondary-button-hover-bg:  #f5f5f5;
+    --minimal-button-bg:          #ffffff;
+    --minimal-button-border:      #e5e5e5;
+    --minimal-button-hover-bg:    #f5f5f5;
+
+    /* 语义色对齐站点：destructive #e40014，成功用 emerald，警告用 amber */
+    --success:          #009767;
+    --success-soft:     #ecfdf5;
+    --info:             #0069a4;
+    --info-soft:        #f0f9ff;
+    --warning:          #b75000;
+    --warning-soft:     #fff7ed;
+    --danger:           #e40014;
+    --danger-soft:      #fef2f2;
+    --danger-color:     #e40014;
+    --success-color:    #009767;
+    --primary-color:    #171717;
+    --secondary-color:  #525252;
+    --text-color:       #0a0a0a;
+    --bg-color:         #ffffff;
+    --border-color:     #e5e5e5;
+}
+
+/* ----- 页面底色与排版：纯白纸面，去掉点阵纹理 ----- */
+body.admin-theme.style-minimal {
+    background: #ffffff !important;
+    color: #0a0a0a !important;
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    letter-spacing: -0.006em;
+}
+
+body.admin-theme.style-minimal .text-muted,
+body.admin-theme.style-minimal .small,
+body.admin-theme.style-minimal .form-help,
+body.admin-theme.style-minimal .field-hint {
+    color: #737373 !important;
+    font-weight: 500 !important;
+}
+
+/* ----- 顶栏 ----- */
+body.admin-theme.style-minimal .navbar {
+    background: rgba(255, 255, 255, 0.88) !important;
+    border-bottom: 1px solid #e5e5e5 !important;
+    box-shadow: none !important;
+    backdrop-filter: saturate(180%) blur(12px);
+    min-height: 58px;
+}
+
+body.admin-theme.style-minimal .navbar-brand h1,
+body.admin-theme.style-minimal .navbar-brand .navbar-title {
+    color: #0a0a0a !important;
+    font-weight: 600;
+    font-size: 1.02rem;
+    letter-spacing: -0.02em;
+}
+
+body.admin-theme.style-minimal .navbar-brand .navbar-eyebrow.cartoon-brand-eyebrow {
+    background: none !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: #a3a3a3 !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-size: 10px !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+}
+
+/* 品牌方块：黑底白字（复用 classic 的文本徽标） */
+body.style-minimal .classic-brand-badge {
+    display: inline-flex !important;
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    align-items: center;
+    justify-content: center;
+    background: #0a0a0a !important;
+    background-image: none !important;
+    color: #ffffff !important;
+    font-size: 0.86rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    box-shadow: none !important;
+    flex-shrink: 0;
+}
+
+body.admin-theme.style-minimal .navbar-logo,
+body.admin-theme.style-minimal .navbar-brand .logo-circle {
+    background: #0a0a0a !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+/* ----- 顶部水平导航 ----- */
+body.admin-theme.style-minimal .desktop-nav-link {
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    color: #666666 !important;
+    font-weight: 500 !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .desktop-nav-link:hover {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .desktop-nav-link.active {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+    border-color: #e5e5e5 !important;
+    box-shadow: none !important;
+    transform: none !important;
+    font-weight: 600 !important;
+}
+
+body.admin-theme.style-minimal .desktop-nav-link i,
+body.admin-theme.style-minimal .desktop-nav-link svg {
+    color: currentColor !important;
+    stroke-width: 1.7 !important;
+}
+
+/* ----- 右上工具区 ----- */
+body.admin-theme.style-minimal .navbar-icon-btn,
+body.admin-theme.style-minimal .mobile-menu-toggle {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    color: #0a0a0a !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-icon-btn:hover,
+body.admin-theme.style-minimal .mobile-menu-toggle:hover {
+    background: #f5f5f5 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-icon-btn:active,
+body.admin-theme.style-minimal .mobile-menu-toggle:active {
+    background: #ededed !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-icon-badge {
+    background: #0a0a0a !important;
+    color: #ffffff !important;
+    border: none !important;
+    box-shadow: none !important;
+    font-weight: 600 !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-btn {
+    background: #f5f5f5 !important;
+    border: 1px solid #e5e5e5 !important;
+    box-shadow: none !important;
+    color: #0a0a0a !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-btn:hover {
+    background: #ededed !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-btn:active {
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-menu {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 8px 24px rgba(10, 10, 10, 0.08) !important;
+    padding: 4px !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-menu-head {
+    border-bottom: 1px solid #f0f0f0 !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-menu-item {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 6px !important;
+    color: #404040 !important;
+    font-weight: 500 !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-menu-item:hover {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-avatar-menu-item-danger:hover {
+    background: #fef2f2 !important;
+    color: #b91c1c !important;
+}
+
+body.admin-theme.style-minimal .profile-avatar-preview-wrap {
+    background: #f5f5f5 !important;
+    border: 1px solid #e5e5e5 !important;
+    box-shadow: none !important;
+}
+
+/* ----- 侧边栏（移动端抽屉） ----- */
+body.admin-theme.style-minimal .sidebar {
+    background: #ffffff !important;
+    border-right: 1px solid #e5e5e5 !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .sidebar-menu .menu-item a {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 6px !important;
+    color: #404040 !important;
+    font-weight: 500 !important;
+}
+
+body.admin-theme.style-minimal .sidebar-menu .menu-item a:hover {
+    background: #f5f5f5 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .sidebar-menu .menu-item.active a {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+    box-shadow: none !important;
+    font-weight: 600 !important;
+}
+
+/* ----- 页头 ----- */
+body.admin-theme.style-minimal .page-header {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .page-header h1,
+body.admin-theme.style-minimal .page-header h2 {
+    font-weight: 600 !important;
+    letter-spacing: -0.02em;
+}
+
+body.admin-theme.style-minimal .pool-meta-pill,
+body.admin-theme.style-minimal .page-header-meta .pill,
+body.admin-theme.style-minimal .page-meta-pill,
+body.admin-theme.style-minimal .panel-meta-pill,
+body.admin-theme.style-minimal .table-meta-pill {
+    background: #fafafa !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    color: #525252 !important;
+    font-weight: 500 !important;
+}
+
+/* ----- 统计卡 ----- */
+body.admin-theme.style-minimal .stat-card {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+    padding: 18px 20px !important;
+    transition: background var(--ca-tx), border-color var(--ca-tx) !important;
+}
+
+body.admin-theme.style-minimal .stat-card:hover {
+    background: #fafafa !important;
+    border-color: #d4d4d4 !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(1) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(2) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(3) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(4) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(5) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(6) .stat-icon {
+    background: #f5f5f5 !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: #171717 !important;
+}
+
+body.admin-theme.style-minimal .stat-icon i,
+body.admin-theme.style-minimal .stat-icon svg {
+    color: #171717 !important;
+    stroke-width: 1.7 !important;
+}
+
+body.admin-theme.style-minimal .stat-value {
+    color: #0a0a0a !important;
+    font-weight: 600 !important;
+    font-size: 1.75rem !important;
+    letter-spacing: -0.03em;
+}
+
+body.admin-theme.style-minimal .stat-label {
+    color: #737373 !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.06em;
+    font-size: 11px !important;
+}
+
+/* ----- 容器 / 卡片 ----- */
+body.admin-theme.style-minimal .content-section,
+body.admin-theme.style-minimal .card,
+body.admin-theme.style-minimal .table-container,
+body.admin-theme.style-minimal .settings-panel,
+body.admin-theme.style-minimal .shell,
+body.admin-theme.style-minimal .info-card,
+body.admin-theme.style-minimal .toolbar-wrap,
+body.admin-theme.style-minimal .team-table-card,
+body.admin-theme.style-minimal .workbench-panel,
+body.admin-theme.style-minimal .workbench-table-card {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+}
+
+body.admin-theme.style-minimal .section-title,
+body.admin-theme.style-minimal .section-header h2,
+body.admin-theme.style-minimal .section-header h3,
+body.admin-theme.style-minimal .content-section > h2,
+body.admin-theme.style-minimal .content-section > h3 {
+    color: #0a0a0a !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.02em;
+}
+
+/* ----- 按钮 ----- */
+body.admin-theme.style-minimal .btn {
+    background-image: none !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    text-shadow: none !important;
+    font-weight: 500 !important;
+    transition: background var(--ca-tx), border-color var(--ca-tx), color var(--ca-tx) !important;
+}
+
+body.admin-theme.style-minimal .btn:hover:not(:disabled) {
+    transform: none !important;
+    box-shadow: none !important;
+    filter: none !important;
+}
+
+body.admin-theme.style-minimal .btn:active:not(:disabled) {
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .btn:disabled {
+    box-shadow: none !important;
+    transform: none !important;
+    opacity: 0.5;
+}
+
+body.admin-theme.style-minimal .btn-primary {
+    background: #171717 !important;
+    border-color: #171717 !important;
+    color: #fafafa !important;
+}
+
+body.admin-theme.style-minimal .btn-primary:hover:not(:disabled) {
+    background: #262626 !important;
+    border-color: #262626 !important;
+}
+
+body.admin-theme.style-minimal .btn-secondary,
+body.admin-theme.style-minimal .btn-plain {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    color: #0a0a0a !important;
+}
+
+body.admin-theme.style-minimal .btn-secondary:hover:not(:disabled),
+body.admin-theme.style-minimal .btn-plain:hover {
+    background: #f5f5f5 !important;
+    border-color: #d4d4d4 !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .btn-secondary.active {
+    background: #171717 !important;
+    border-color: #171717 !important;
+    color: #fafafa !important;
+}
+
+body.admin-theme.style-minimal .btn-danger {
+    background: #ffffff !important;
+    border: 1px solid #fecaca !important;
+    color: #b91c1c !important;
+}
+
+body.admin-theme.style-minimal .btn-danger:hover:not(:disabled) {
+    background: #fef2f2 !important;
+    border-color: #fca5a5 !important;
+}
+
+body.admin-theme.style-minimal .btn-info,
+body.admin-theme.style-minimal .btn-success,
+body.admin-theme.style-minimal .btn-mint {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    color: #0a0a0a !important;
+}
+
+body.admin-theme.style-minimal .btn-info:hover:not(:disabled),
+body.admin-theme.style-minimal .btn-success:hover:not(:disabled) {
+    background: #f5f5f5 !important;
+}
+
+/* 状态开关（已开启 / 未开启）改为极简描边开关 */
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on {
+    background: #171717 !important;
+    border: 1px solid #171717 !important;
+    color: #fafafa !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on:hover {
+    background: #262626 !important;
+    filter: none !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on::after {
+    display: none !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on i,
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on svg {
+    color: #fafafa !important;
+    stroke: #fafafa !important;
+    stroke-width: 1.9 !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-off {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    color: #a3a3a3 !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-off:hover {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-off i,
+body.admin-theme.style-minimal .btn-minimal.is-toggle-off svg {
+    color: currentColor !important;
+    stroke: currentColor !important;
+    opacity: 1 !important;
+}
+
+/* ----- 表单控件 ----- */
+body.admin-theme.style-minimal .form-control,
+body.admin-theme.style-minimal .form-control-sm,
+body.admin-theme.style-minimal .form-input,
+body.admin-theme.style-minimal select.form-control,
+body.admin-theme.style-minimal textarea.form-control,
+body.admin-theme.style-minimal .input-group-clean {
+    background: #ffffff !important;
+    color: #0a0a0a !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    font-weight: 400 !important;
+}
+
+body.admin-theme.style-minimal .form-input:hover,
+body.admin-theme.style-minimal .form-control:hover {
+    background: #ffffff !important;
+    border-color: #d4d4d4 !important;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .form-input:focus,
+body.admin-theme.style-minimal .form-control:focus,
+body.admin-theme.style-minimal textarea.form-control:focus {
+    background: #ffffff !important;
+    border-color: #0a0a0a !important;
+    box-shadow: 0 0 0 3px var(--focus-ring) !important;
+    transform: none !important;
+    outline: none !important;
+}
+
+body.admin-theme.style-minimal input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: none;
+    opacity: 0.55;
+}
+
+/* ----- 数据表 ----- */
+body.admin-theme.style-minimal .data-table,
+body.admin-theme.style-minimal .table-container {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .data-table thead,
+body.admin-theme.style-minimal .data-table th {
+    background: #ffffff !important;
+    color: #737373 !important;
+    border-bottom: 1px solid #e5e5e5 !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    font-size: 11px !important;
+}
+
+body.admin-theme.style-minimal .data-table td {
+    border-bottom: 1px solid #f0f0f0 !important;
+    color: #262626 !important;
+}
+
+body.admin-theme.style-minimal .data-table tbody tr:hover td {
+    background: #fafafa !important;
+}
+
+body.admin-theme.style-minimal .data-table tbody tr:last-child td {
+    border-bottom: none !important;
+}
+
+/* ----- 徽章（含状态徽章） ----- */
+body.admin-theme.style-minimal .status-badge,
+body.admin-theme.style-minimal .badge {
+    background: #fafafa !important;
+    color: #404040 !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    font-weight: 500 !important;
+    font-size: 11.5px !important;
+    letter-spacing: 0.01em;
+}
+
+body.admin-theme.style-minimal .status-badge.status-active,
+body.admin-theme.style-minimal .badge-success {
+    background: #0a0a0a !important;
+    color: #fafafa !important;
+    border-color: #0a0a0a !important;
+}
+
+body.admin-theme.style-minimal .status-badge.status-banned,
+body.admin-theme.style-minimal .status-badge.status-expired,
+body.admin-theme.style-minimal .badge-error,
+body.admin-theme.style-minimal .badge-danger {
+    background: #fef2f2 !important;
+    color: #b91c1c !important;
+    border-color: #fecaca !important;
+}
+
+body.admin-theme.style-minimal .status-badge.status-warning,
+body.admin-theme.style-minimal .badge-warn,
+body.admin-theme.style-minimal .badge-warning,
+body.admin-theme.style-minimal .status-badge.status-info,
+body.admin-theme.style-minimal .badge-info,
+body.admin-theme.style-minimal .status-badge.status-pending,
+body.admin-theme.style-minimal .badge-pending,
+body.admin-theme.style-minimal .badge-secondary {
+    background: #f5f5f5 !important;
+    color: #525252 !important;
+    border-color: #e5e5e5 !important;
+}
+
+/* ----- 模态框 ----- */
+body.admin-theme.style-minimal .modal,
+body.admin-theme.style-minimal .modal-overlay {
+    background: rgba(10, 10, 10, 0.45) !important;
+    backdrop-filter: blur(2px) !important;
+}
+
+body.admin-theme.style-minimal .modal > form,
+body.admin-theme.style-minimal .modal-overlay > .modal,
+body.admin-theme.style-minimal .modal-content {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 12px !important;
+    box-shadow: 0 16px 48px rgba(10, 10, 10, 0.14) !important;
+}
+
+body.admin-theme.style-minimal .modal-dialog > .modal-header,
+body.admin-theme.style-minimal .modal-header {
+    background: #ffffff !important;
+    border: none !important;
+    border-bottom: 1px solid #e5e5e5 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    color: #0a0a0a !important;
+}
+
+body.admin-theme.style-minimal .modal-dialog > .modal-header h2,
+body.admin-theme.style-minimal .modal-dialog > .modal-header h3 {
+    color: #0a0a0a !important;
+    font-weight: 600 !important;
+}
+
+body.admin-theme.style-minimal .modal-dialog > .modal-body,
+body.admin-theme.style-minimal .modal-body {
+    background: #ffffff !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .modal-dialog > .modal-footer,
+body.admin-theme.style-minimal .modal-footer {
+    background: #fafafa !important;
+    border: none !important;
+    border-top: 1px solid #e5e5e5 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .modal-close {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    color: #525252 !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .modal-close:hover {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .modal-close:active {
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .modal .alert,
+body.admin-theme.style-minimal .modal-body .alert,
+body.admin-theme.style-minimal .modal-body .info-box,
+body.admin-theme.style-minimal .info-box,
+body.admin-theme.style-minimal .warning-box {
+    border-radius: 8px !important;
+    border: 1px solid #e5e5e5 !important;
+    box-shadow: none !important;
+    font-weight: 400 !important;
+    background: #fafafa !important;
+    color: #404040 !important;
+}
+
+body.admin-theme.style-minimal .warning-box {
+    background: #fffbf5 !important;
+    border-color: #fed7aa !important;
+    color: #9a3412 !important;
+}
+
+/* ----- Toast：浅色卡片 + 左侧细色条 ----- */
+body.admin-theme.style-minimal .toast {
+    background: #ffffff !important;
+    color: #0a0a0a !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 8px 24px rgba(10, 10, 10, 0.1) !important;
+    font-weight: 400 !important;
+}
+
+body.admin-theme.style-minimal .toast.success { border-left: 3px solid #171717 !important; }
+body.admin-theme.style-minimal .toast.info    { border-left: 3px solid #737373 !important; }
+body.admin-theme.style-minimal .toast.warning { border-left: 3px solid #a16207 !important; }
+body.admin-theme.style-minimal .toast.error   { border-left: 3px solid #e40014 !important; }
+
+body.admin-theme.style-minimal .toast-title {
+    color: #0a0a0a !important;
+    font-weight: 600 !important;
+}
+
+body.admin-theme.style-minimal .toast-message {
+    color: #525252 !important;
+}
+
+/* ----- 下拉菜单 ----- */
+body.admin-theme.style-minimal .dropdown-menu {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 8px !important;
+    box-shadow: 0 8px 24px rgba(10, 10, 10, 0.08) !important;
+    padding: 4px !important;
+}
+
+body.admin-theme.style-minimal .dropdown-item {
+    color: #404040 !important;
+    font-weight: 500 !important;
+    border-radius: 6px !important;
+}
+
+body.admin-theme.style-minimal .dropdown-item:hover {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+}
+
+/* ----- 标签页 / 筛选条 / 设置导航 ----- */
+body.admin-theme.style-minimal .modal-tab-btn,
+body.admin-theme.style-minimal .tab-btn,
+body.admin-theme.style-minimal .filter-tab,
+body.admin-theme.style-minimal .top-tab,
+body.admin-theme.style-minimal .settings-nav-pill {
+    background: transparent !important;
+    color: #666666 !important;
+    border: 1px solid transparent !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    font-weight: 500 !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .modal-tab-btn:hover,
+body.admin-theme.style-minimal .tab-btn:hover,
+body.admin-theme.style-minimal .filter-tab:hover,
+body.admin-theme.style-minimal .settings-nav-pill:hover {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .modal-tab-btn.active,
+body.admin-theme.style-minimal .tab-btn.active,
+body.admin-theme.style-minimal .filter-tab.active,
+body.admin-theme.style-minimal .settings-nav-pill.active {
+    background: #f5f5f5 !important;
+    color: #0a0a0a !important;
+    border-color: #e5e5e5 !important;
+    box-shadow: none !important;
+    font-weight: 600 !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .filter-tabs,
+body.admin-theme.style-minimal .search-form-grid,
+body.admin-theme.style-minimal .settings-top-nav,
+body.admin-theme.style-minimal .settings-side-nav {
+    background: #fafafa !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .settings-side-nav a {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 6px !important;
+    color: #525252 !important;
+    font-weight: 500 !important;
+}
+
+body.admin-theme.style-minimal .settings-side-nav a:hover {
+    background: #f5f5f5 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .settings-side-nav a.active {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    color: #0a0a0a !important;
+    box-shadow: none !important;
+    transform: none !important;
+    font-weight: 600 !important;
+}
+
+body.admin-theme.style-minimal .theme-option-card {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .theme-option-card:hover {
+    border-color: #a3a3a3 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal .theme-option-card:has(input:checked) {
+    border-color: #0a0a0a !important;
+    box-shadow: 0 0 0 1px #0a0a0a !important;
+}
+
+/* ----- 空状态 / 页脚 ----- */
+body.admin-theme.style-minimal .empty-result,
+body.admin-theme.style-minimal .empty-state,
+body.admin-theme.style-minimal .team-empty-state,
+body.admin-theme.style-minimal .workbench-empty-state {
+    background: #fafafa !important;
+    border: 1px dashed #e5e5e5 !important;
+    border-radius: 10px !important;
+    color: #737373 !important;
+}
+
+body.admin-theme.style-minimal .empty-icon {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: #a3a3a3 !important;
+}
+
+body.admin-theme.style-minimal .footer {
+    background: transparent !important;
+    border-top: 1px solid #f0f0f0 !important;
+    color: #a3a3a3 !important;
+}
+
+/* ----- 进度条 / 提示条 ----- */
+body.admin-theme.style-minimal .batch-progress-panel {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: 0 8px 24px rgba(10, 10, 10, 0.08) !important;
+}
+
+body.admin-theme.style-minimal .batch-progress-bar {
+    background: #f5f5f5 !important;
+    border: none !important;
+    border-radius: 999px !important;
+}
+
+body.admin-theme.style-minimal .batch-progress-fill {
+    background: #171717 !important;
+}
+
+body.admin-theme.style-minimal .banner {
+    background: #fafafa !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+/* ----- 装饰清除：点阵 / 贴纸 / 吉祥物 / 光晕 ----- */
+body.admin-theme.style-minimal .cartoon-deco,
+body.admin-theme.style-minimal .cartoon-brand-mark,
+body.admin-theme.style-minimal .brand-mark-spark,
+body.admin-theme.style-minimal .auth-stickers,
+body.admin-theme.style-minimal .auth-orbs,
+body.admin-theme.style-minimal .orb,
+body.admin-theme.style-minimal .bg-scene,
+body.admin-theme.style-minimal .grid-overlay,
+body.admin-theme.style-minimal .page-dots {
+    display: none !important;
+}
+
+body.admin-theme.style-minimal .navbar-brand .brand-badge.cartoon-brand-mark {
+    transform: none !important;
+    box-shadow: none !important;
+    border: none !important;
+}
+
+body.style-minimal .navbar-brand .cartoon-brand-title {
+    background: none !important;
+    -webkit-background-clip: unset !important;
+    -webkit-text-fill-color: currentColor !important;
+    animation: none !important;
+}
+
+/* ----- 配色锁定：简约风格下隐藏配色快捷切换 ----- */
+body.admin-theme.style-minimal .navbar-theme-btn,
+body.admin-theme.style-minimal #openThemeSwitcherBtn,
+body.admin-theme.style-minimal.auth-page .auth-theme-fab {
+    display: none !important;
+}
+
+/* ================================================================
+   MINIMAL · 登录页（auth-page）
+   ================================================================ */
+body.admin-theme.style-minimal.auth-page {
+    background: #ffffff !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-card {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 14px !important;
+    box-shadow: 0 1px 3px rgba(10, 10, 10, 0.06) !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-eyebrow.cartoon-brand-eyebrow {
+    background: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    color: #a3a3a3 !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-size: 10px !important;
+    padding: 0 !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-brand-name.cartoon-brand-title {
+    background: none !important;
+    -webkit-background-clip: unset !important;
+    -webkit-text-fill-color: currentColor !important;
+    color: #0a0a0a !important;
+    animation: none !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.02em;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-feature-list li {
+    background: #fafafa !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-feature-list li:hover {
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-feature-icon {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: #171717 !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-input-wrap {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-input-wrap:focus-within {
+    border-color: #0a0a0a !important;
+    box-shadow: 0 0 0 3px var(--focus-ring) !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-submit.btn-primary {
+    background: #171717 !important;
+    border: 1px solid #171717 !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: #fafafa !important;
+    text-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-submit:hover {
+    background: #262626 !important;
+    border-color: #262626 !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-submit:active {
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-error {
+    background: #fef2f2 !important;
+    border: 1px solid #fecaca !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+    color: #b91c1c !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-divider::after {
+    background: #e5e5e5 !important;
+}
+
+body.admin-theme.style-minimal .classic-brand-badge,
+body.admin-theme.style-minimal.auth-page .auth-brand-compact .classic-brand-badge {
+    background: #0a0a0a !important;
+    background-image: none !important;
+    box-shadow: none !important;
+    color: #ffffff !important;
+}
+
+@media (max-width: 768px) {
+    body.style-minimal .classic-brand-badge,
+    body.admin-theme.style-minimal.auth-page .auth-brand-compact .classic-brand-badge {
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        font-size: 0.76rem;
+    }
+}
+
+/* ================================================================
+   MINIMAL · 工作台表格内联样式回拉
+   admin/index.html 的 <style> 块在 style.css 之后加载，且带 !important，
+   其中「质保席位开关」与「编辑/推送」按钮的暖调规则会压过上面的通用覆盖，
+   这里用更高特异性（多一个 style-minimal 类）把它们拉回黑白。
+   ================================================================ */
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"] {
+    background: #171717 !important;
+    border-color: #171717 !important;
+    color: #fafafa !important;
+    box-shadow: none !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"]:hover:not(:disabled) {
+    background: #262626 !important;
+    border-color: #262626 !important;
+    color: #fafafa !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"] i,
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"] svg {
+    color: #fafafa !important;
+    stroke: #fafafa !important;
+    stroke-width: 1.9 !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-edit-team.btn-minimal.btn-primary,
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-push-cliproxyapi.btn-minimal.btn-primary {
+    background: #171717 !important;
+    border-color: #171717 !important;
+    color: #fafafa !important;
+    box-shadow: none !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-edit-team.btn-minimal.btn-primary:hover,
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-push-cliproxyapi.btn-minimal.btn-primary:hover {
+    background: #262626 !important;
+    border-color: #262626 !important;
+    color: #fafafa !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-edit-team.btn-minimal.btn-primary:focus-visible,
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-push-cliproxyapi.btn-minimal.btn-primary:focus-visible {
+    box-shadow: 0 0 0 3px var(--focus-ring) !important;
+}
+
+/* ================================================================
+   MINIMAL · 对齐 ifnexora.com 实测 token 的精修层
+   数据来源：该站 Tailwind v4 主题变量实测值 ——
+     --background #fff / --foreground #0a0a0a / --primary #171717
+     --secondary --muted --accent #f5f5f5 / --muted-foreground #737373
+     --destructive #e40014 / --border --input #e5e5e5 / --ring #a1a1a1
+     --radius .625rem(10px) / --sidebar #fafafa / --tracking-tight -.025em
+     字体 Geist；卡片 = ring-1 ring-foreground/5 + shadow-sm；顶栏 h-14 80% 白 + blur-xl
+   本段位于文件最后的 minimal 层之上，用同样的选择器把值纠正为实测值。
+   ================================================================ */
+
+/* ----- 排版：Geist + 紧凑字距 ----- */
+body.admin-theme.style-minimal {
+    font-family: 'Geist', 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-serif;
+    letter-spacing: -0.011em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+body.admin-theme.style-minimal h1,
+body.admin-theme.style-minimal h2,
+body.admin-theme.style-minimal .section-title,
+body.admin-theme.style-minimal .section-header h2,
+body.admin-theme.style-minimal .section-header h3,
+body.admin-theme.style-minimal .page-header h1,
+body.admin-theme.style-minimal .page-header h2,
+body.admin-theme.style-minimal .navbar-brand h1 {
+    letter-spacing: -0.03em;
+}
+
+/* 小标签：站点用 11px / uppercase / semibold / tracking 0.2em */
+body.admin-theme.style-minimal .navbar-eyebrow,
+body.admin-theme.style-minimal .navbar-brand .navbar-eyebrow.cartoon-brand-eyebrow,
+body.admin-theme.style-minimal .page-header-kicker,
+body.admin-theme.style-minimal .stat-label {
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.2em !important;
+    text-transform: uppercase;
+    color: #737373 !important;
+}
+
+/* ----- 顶栏：sticky h-14 / 80% 白 / backdrop-blur-xl / border-border-70 ----- */
+body.admin-theme.style-minimal .navbar {
+    background: rgba(255, 255, 255, 0.8) !important;
+    border-bottom: 1px solid rgba(10, 10, 10, 0.07) !important;
+    box-shadow: none !important;
+    backdrop-filter: saturate(180%) blur(24px) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(24px) !important;
+    min-height: 56px;
+}
+
+body.admin-theme.style-minimal .navbar-brand h1,
+body.admin-theme.style-minimal .navbar-brand .navbar-title {
+    letter-spacing: -0.03em;
+}
+
+/* ----- 侧栏（移动端抽屉）：--sidebar #fafafa ----- */
+body.admin-theme.style-minimal .sidebar,
+body.admin-theme.style-minimal .settings-side-nav,
+body.admin-theme.style-minimal .settings-top-nav {
+    background: #fafafa !important;
+    border-color: rgba(10, 10, 10, 0.07) !important;
+}
+
+/* ----- 卡片：ring-1 ring-foreground/5 + shadow-sm + 大圆角 ----- */
+body.admin-theme.style-minimal .content-section,
+body.admin-theme.style-minimal .card,
+body.admin-theme.style-minimal .table-container,
+body.admin-theme.style-minimal .settings-panel,
+body.admin-theme.style-minimal .shell,
+body.admin-theme.style-minimal .info-card,
+body.admin-theme.style-minimal .toolbar-wrap,
+body.admin-theme.style-minimal .team-table-card,
+body.admin-theme.style-minimal .workbench-panel,
+body.admin-theme.style-minimal .workbench-table-card,
+body.admin-theme.style-minimal .page-header,
+body.admin-theme.style-minimal .data-table {
+    background: #ffffff !important;
+    border: 1px solid rgba(10, 10, 10, 0.06) !important;
+    border-radius: var(--ca-r-card) !important;
+    box-shadow: 0 1px 3px rgba(10, 10, 10, 0.05) !important;
+}
+
+body.admin-theme.style-minimal .page-header {
+    border-radius: var(--ca-r-xl) !important;
+}
+
+/* ----- 统计卡 ----- */
+body.admin-theme.style-minimal .stat-card {
+    background: #ffffff !important;
+    border: 1px solid rgba(10, 10, 10, 0.06) !important;
+    border-radius: var(--ca-r-xl) !important;
+    box-shadow: 0 1px 3px rgba(10, 10, 10, 0.05) !important;
+}
+
+body.admin-theme.style-minimal .stat-card:hover {
+    background: #fafafa !important;
+    border-color: rgba(10, 10, 10, 0.1) !important;
+}
+
+body.admin-theme.style-minimal .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(1) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(2) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(3) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(4) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(5) .stat-icon,
+body.admin-theme.style-minimal .stat-card:nth-child(6) .stat-icon {
+    background: #f5f5f5 !important;
+    border: 1px solid rgba(10, 10, 10, 0.06) !important;
+    border-radius: var(--ca-r-lg) !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .stat-value {
+    font-size: 1.75rem !important;
+    font-weight: 600 !important;
+    letter-spacing: -0.03em;
+}
+
+/* ----- 按钮：rounded-md 8px / text-sm 14px / medium ----- */
+body.admin-theme.style-minimal .btn,
+body.admin-theme.style-minimal .btn-minimal,
+body.admin-theme.style-minimal .btn-plain {
+    border-radius: var(--ca-r-md) !important;
+    font-size: 0.875rem !important;
+    font-weight: 500 !important;
+}
+
+body.admin-theme.style-minimal .btn-primary {
+    background: #171717 !important;
+    border-color: #171717 !important;
+    color: #fafafa !important;
+}
+
+body.admin-theme.style-minimal .btn-primary:hover:not(:disabled) {
+    background: #262626 !important;
+    border-color: #262626 !important;
+}
+
+body.admin-theme.style-minimal .btn:focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 3px var(--focus-ring) !important;
+}
+
+/* 开启态：站点用 emerald-600 文字 + 浅绿底，而不是纯黑块 */
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on {
+    background: #ecfdf5 !important;
+    border: 1px solid rgba(0, 151, 103, 0.25) !important;
+    color: #009767 !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on:hover {
+    background: #d9f7ec !important;
+    border-color: rgba(0, 151, 103, 0.4) !important;
+    filter: none !important;
+}
+
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on i,
+body.admin-theme.style-minimal .btn-minimal.is-toggle-on svg {
+    color: #009767 !important;
+    stroke: #009767 !important;
+}
+
+/* ----- 表单：rounded-md + ring #a1a1a1/30 ----- */
+body.admin-theme.style-minimal .form-control,
+body.admin-theme.style-minimal .form-control-sm,
+body.admin-theme.style-minimal .form-input,
+body.admin-theme.style-minimal select.form-control,
+body.admin-theme.style-minimal textarea.form-control,
+body.admin-theme.style-minimal .input-group-clean {
+    border-radius: var(--ca-r-md) !important;
+}
+
+body.admin-theme.style-minimal .form-input:focus,
+body.admin-theme.style-minimal .form-control:focus,
+body.admin-theme.style-minimal textarea.form-control:focus {
+    border-color: #a1a1a1 !important;
+    box-shadow: 0 0 0 3px var(--focus-ring) !important;
+}
+
+body.admin-theme.style-minimal .form-input:hover,
+body.admin-theme.style-minimal .form-control:hover {
+    border-color: #d4d4d4 !important;
+}
+
+/* ----- 数据表：行分隔 border-border/70，表头 11px 灰字 ----- */
+body.admin-theme.style-minimal .data-table th {
+    color: #737373 !important;
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase;
+    border-bottom: 1px solid rgba(10, 10, 10, 0.07) !important;
+}
+
+body.admin-theme.style-minimal .data-table td {
+    border-bottom: 1px solid rgba(10, 10, 10, 0.06) !important;
+}
+
+/* ----- 徽章：pill + 语义淡底 ----- */
+body.admin-theme.style-minimal .status-badge,
+body.admin-theme.style-minimal .badge {
+    border-radius: var(--ca-r-pill) !important;
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    padding: 2px 10px !important;
+    background: #f5f5f5 !important;
+    color: #525252 !important;
+    border: 1px solid rgba(10, 10, 10, 0.06) !important;
+    box-shadow: none !important;
+}
+
+body.admin-theme.style-minimal .status-badge.status-active,
+body.admin-theme.style-minimal .badge-success {
+    background: #ecfdf5 !important;
+    color: #009767 !important;
+    border-color: rgba(0, 151, 103, 0.2) !important;
+}
+
+body.admin-theme.style-minimal .status-badge.status-banned,
+body.admin-theme.style-minimal .status-badge.status-expired,
+body.admin-theme.style-minimal .badge-error,
+body.admin-theme.style-minimal .badge-danger {
+    background: #fef2f2 !important;
+    color: #e40014 !important;
+    border-color: rgba(228, 0, 20, 0.2) !important;
+}
+
+/* ----- 空态：站点为居中卡片 + 极淡巨扩散阴影 ----- */
+body.admin-theme.style-minimal .empty-result,
+body.admin-theme.style-minimal .empty-state,
+body.admin-theme.style-minimal .team-empty-state,
+body.admin-theme.style-minimal .workbench-empty-state {
+    background: #ffffff !important;
+    border: 1px dashed rgba(10, 10, 10, 0.1) !important;
+    border-radius: var(--ca-r-card) !important;
+    box-shadow: 0 24px 80px -48px #0a0a0a !important;
+    color: #737373 !important;
+}
+
+/* ----- 工作台表格内联样式再次拉平（含 #262626 → #262626） ----- */
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"] {
+    background: #ecfdf5 !important;
+    border-color: rgba(0, 151, 103, 0.25) !important;
+    color: #009767 !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"]:hover:not(:disabled) {
+    background: #d9f7ec !important;
+    border-color: rgba(0, 151, 103, 0.4) !important;
+    color: #009767 !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"] i,
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-toggle-warranty-seat[data-enabled="true"] svg {
+    color: #009767 !important;
+    stroke: #009767 !important;
+}
+
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-push-cliproxyapi.btn-minimal.btn-primary:hover,
+html.style-minimal body.admin-theme.style-minimal .team-list-table-container .btn-edit-team.btn-minimal.btn-primary:hover {
+    background: #262626 !important;
+    border-color: #262626 !important;
+}
+
+/* ----- 登录页 ----- */
+body.admin-theme.style-minimal.auth-page .auth-submit:hover {
+    background: #262626 !important;
+    border-color: #262626 !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-input-wrap:focus-within {
+    border-color: #a1a1a1 !important;
+    box-shadow: 0 0 0 3px var(--focus-ring) !important;
+}
+
+body.admin-theme.style-minimal.auth-page .auth-card {
+    border: 1px solid rgba(10, 10, 10, 0.06) !important;
+    border-radius: var(--ca-r-card) !important;
+    box-shadow: 0 24px 80px -48px #0a0a0a !important;
+}
+
+/* ----- 保留极少量语义色的小提示框（站点用 amber 表达警告） ----- */
+body.admin-theme.style-minimal .warning-box,
+body.admin-theme.style-minimal .modal-body .warning-box {
+    background: #fff7ed !important;
+    border-color: rgba(183, 80, 0, 0.25) !important;
+    color: #9a3412 !important;
+}
+
+/* ================================================================
+   MINIMAL · 右上角「简约 / 卡通」风格切换按钮
+   按钮本体复用 .navbar-icon-btn，两套风格下都协调；
+   两个图标按 body 上的 style-* 类显隐，与 theme-icon-sun/moon 同一套做法。
+   ================================================================ */
+body.admin-theme .navbar-style-btn .style-icon-cartoon,
+body.admin-theme .navbar-style-btn .style-icon-minimal {
+    display: none;
+}
+
+/* 卡通 / 经典：显示卡通图标，点击进入简约 */
+body.admin-theme.style-cartoon .navbar-style-btn .style-icon-cartoon,
+body.admin-theme.style-classic .navbar-style-btn .style-icon-cartoon {
+    display: inline-block;
+}
+
+/* 简约：显示简约图标，点击切回卡通 */
+body.admin-theme.style-minimal .navbar-style-btn .style-icon-minimal {
+    display: inline-block;
+}
+
+/* 简约下按钮保持中性描边，不继承配色按钮的彩色高亮 */
+body.admin-theme.style-minimal .navbar-style-btn {
+    background: #ffffff !important;
+    border: 1px solid #e5e5e5 !important;
+    color: #0a0a0a !important;
+}
+
+body.admin-theme.style-minimal .navbar-style-btn:hover {
+    background: #f5f5f5 !important;
+    border-color: #d4d4d4 !important;
+}

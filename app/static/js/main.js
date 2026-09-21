@@ -261,26 +261,42 @@ function updateThemeToggleButton(theme) {
     openBtn.title = isWarm ? '切换为冷调' : '切换为暖调';
 }
 
+// 界面风格白名单：cartoon（卡通）/ classic（经典）/ minimal（简约 · 黑白极简）
+// 默认风格与后端 DEFAULT_UI_STYLE 保持一致：简约
+const UI_STYLE_VALUES = ['cartoon', 'classic', 'minimal'];
+const UI_STYLE_DEFAULT = 'minimal';
+const UI_STYLE_CLASSES = UI_STYLE_VALUES.map((name) => `style-${name}`);
+
+function normalizeUiStyleValue(value) {
+    const normalized = String(value || '').toLowerCase();
+    return UI_STYLE_VALUES.includes(normalized) ? normalized : UI_STYLE_DEFAULT;
+}
+
+// 简约风格自带黑白灰阶调色板，配色主题（冷调/暖调）不参与渲染
+function isUiStyleThemeLocked(style) {
+    return normalizeUiStyleValue(style) === 'minimal';
+}
+
 function applyUiStyle(styleName) {
     const body = document.body;
     if (!body) return;
-    const normalized = String(styleName || '').toLowerCase() === 'classic' ? 'classic' : 'cartoon';
+    const normalized = normalizeUiStyleValue(styleName);
     body.dataset.uiStyle = normalized;
-    body.classList.remove('style-classic', 'style-cartoon');
+    body.classList.remove(...UI_STYLE_CLASSES);
     body.classList.add(`style-${normalized}`);
-    document.documentElement.classList.remove('style-classic', 'style-cartoon');
+    document.documentElement.classList.remove(...UI_STYLE_CLASSES);
     document.documentElement.classList.add(`style-${normalized}`);
 }
 
 function getCurrentUiStyle() {
     const bodyStyle = document.body?.dataset?.uiStyle;
-    if (bodyStyle === 'classic' || bodyStyle === 'cartoon') return bodyStyle;
+    if (UI_STYLE_VALUES.includes(bodyStyle)) return bodyStyle;
     try {
         const saved = localStorage.getItem('ui_style');
-        if (saved === 'classic' || saved === 'cartoon') return saved;
+        if (UI_STYLE_VALUES.includes(saved)) return saved;
     } catch (e) {}
-    if (window.__EARLY_UI_STYLE === 'classic' || window.__EARLY_UI_STYLE === 'cartoon') return window.__EARLY_UI_STYLE;
-    return 'cartoon';
+    if (UI_STYLE_VALUES.includes(window.__EARLY_UI_STYLE)) return window.__EARLY_UI_STYLE;
+    return UI_STYLE_DEFAULT;
 }
 
 async function saveUiStyle(style) {
@@ -296,6 +312,33 @@ async function saveUiStyle(style) {
     return data.style || style;
 }
 
+// 右上角「简约 / 卡通」切换按钮：显示当前风格图标，点击切到对侧
+function updateStyleToggleButton(style) {
+    const btn = document.getElementById('openStyleSwitcherBtn');
+    if (!btn) return;
+    // 经典风格归入「非简约」一侧，点一下进入简约
+    const isMinimal = isUiStyleThemeLocked(style);
+    btn.dataset.currentStyle = isMinimal ? 'minimal' : 'cartoon';
+    const label = isMinimal ? '切换为卡通风格' : '切换为简约风格';
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+}
+
+// 简约风格把配色锁成黑白灰，配色按钮在该风格下没有意义 → 隐藏
+function syncThemeButtonVisibility(style) {
+    const btn = document.getElementById('openThemeSwitcherBtn');
+    if (!btn) return;
+    if (isUiStyleThemeLocked(style)) {
+        btn.hidden = true;
+        btn.setAttribute('aria-hidden', 'true');
+        btn.title = '简约风格使用固定黑白配色，可用左侧按钮切回卡通';
+        return;
+    }
+    btn.hidden = false;
+    btn.removeAttribute('aria-hidden');
+    updateThemeToggleButton(getCurrentSystemTheme());
+}
+
 async function initThemeSwitcher() {
     const isAdmin = !!document.body?.classList.contains('admin-theme');
     const isAuthPage = !!document.body?.classList.contains('auth-page');
@@ -303,6 +346,8 @@ async function initThemeSwitcher() {
     applyUiStyle(getCurrentUiStyle());
 
     if (!isAdmin || isAuthPage) return;
+
+    let activeStyle = getCurrentUiStyle();
 
     try {
         const [themeRes, styleRes] = await Promise.all([
@@ -315,29 +360,52 @@ async function initThemeSwitcher() {
         }
         const styleData = await styleRes.json();
         if (styleRes.ok && styleData.success) {
-            applyUiStyle(styleData.style);
-            try { localStorage.setItem('ui_style', styleData.style); } catch (e) {}
+            activeStyle = normalizeUiStyleValue(styleData.style);
+            applyUiStyle(activeStyle);
+            try { localStorage.setItem('ui_style', activeStyle); } catch (e) {}
         }
     } catch (error) {
         console.error('load ui theme/style failed:', error);
     }
 
     updateThemeToggleButton(getCurrentSystemTheme());
+    updateStyleToggleButton(activeStyle);
+    syncThemeButtonVisibility(activeStyle);
 
-    const openBtn = document.getElementById('openThemeSwitcherBtn');
-    if (!openBtn) return;
+    const themeBtn = document.getElementById('openThemeSwitcherBtn');
+    if (themeBtn) {
+        themeBtn.addEventListener('click', async () => {
+            const current = getCurrentSystemTheme();
+            const nextTheme = current === 'warm' ? 'ocean' : 'warm';
+            try {
+                const savedTheme = await saveSystemTheme(nextTheme);
+                applySystemTheme(savedTheme);
+                try { localStorage.setItem('ui_theme', savedTheme); } catch (e) {}
+                updateThemeToggleButton(savedTheme);
+                showToast(`已切换为${savedTheme === 'warm' ? '暖调' : '冷调'}主题`, 'success');
+            } catch (error) {
+                showToast(getFriendlyAdminErrorMessage(error.message || '保存失败', 0, 'settings'), 'error');
+            }
+        });
+    }
 
-    openBtn.addEventListener('click', async () => {
-        const current = getCurrentSystemTheme();
-        const nextTheme = current === 'warm' ? 'ocean' : 'warm';
+    const styleBtn = document.getElementById('openStyleSwitcherBtn');
+    if (!styleBtn) return;
+
+    styleBtn.addEventListener('click', async () => {
+        const next = isUiStyleThemeLocked(getCurrentUiStyle()) ? 'cartoon' : 'minimal';
+        styleBtn.disabled = true;
         try {
-            const savedTheme = await saveSystemTheme(nextTheme);
-            applySystemTheme(savedTheme);
-            try { localStorage.setItem('ui_theme', savedTheme); } catch (e) {}
-            updateThemeToggleButton(savedTheme);
-            showToast(`已切换为${savedTheme === 'warm' ? '暖调' : '冷调'}主题`, 'success');
+            const saved = await saveUiStyle(next);
+            applyUiStyle(saved);
+            try { localStorage.setItem('ui_style', saved); } catch (e) {}
+            updateStyleToggleButton(saved);
+            syncThemeButtonVisibility(saved);
+            showToast(`已切换为${saved === 'minimal' ? '简约' : '卡通'}风格`, 'success');
         } catch (error) {
             showToast(getFriendlyAdminErrorMessage(error.message || '保存失败', 0, 'settings'), 'error');
+        } finally {
+            styleBtn.disabled = false;
         }
     });
 }

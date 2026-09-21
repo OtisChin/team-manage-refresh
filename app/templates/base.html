@@ -21,9 +21,9 @@
             }
             try {
                 var savedStyle = localStorage.getItem('ui_style');
-                var normStyle = (savedStyle === 'classic' || savedStyle === 'cartoon') ? savedStyle : null;
+                var normStyle = (savedStyle === 'classic' || savedStyle === 'minimal' || savedStyle === 'cartoon') ? savedStyle : null;
                 if (normStyle) {
-                    document.documentElement.classList.remove('style-classic', 'style-cartoon');
+                    document.documentElement.classList.remove('style-classic', 'style-cartoon', 'style-minimal');
                     document.documentElement.classList.add('style-' + normStyle);
                     window.__EARLY_UI_STYLE = normStyle;
                 }
@@ -34,14 +34,14 @@
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260429-ui-style-toggle">
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260922-style-switch">
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
     {% block extra_css %}{% endblock %}
 </head>
 
-<body class="bg-gray-50 text-slate-900 admin-theme theme-{{ ui_theme|default('ocean') }} style-{{ ui_style|default('cartoon') }}{% if not user %} auth-page{% endif %}" data-pool-type="{% if active_page == 'welfare' %}welfare{% else %}normal{% endif %}" data-ui-theme="{{ ui_theme|default('ocean') }}" data-ui-style="{{ ui_style|default('cartoon') }}">
+<body class="bg-gray-50 text-slate-900 admin-theme theme-{{ ui_theme|default('ocean') }} style-{{ ui_style|default('minimal') }}{% if not user %} auth-page{% endif %}" data-pool-type="{% if active_page == 'welfare' %}welfare{% else %}normal{% endif %}" data-ui-theme="{{ ui_theme|default('ocean') }}" data-ui-style="{{ ui_style|default('minimal') }}">
     {% if user %}
     {% set system_active = active_page in ['settings', 'announcement'] %}
     <nav class="navbar">
@@ -103,6 +103,10 @@
                 <button type="button" id="openRenewalRequestsBtn" class="navbar-icon-btn" onclick="openRenewalRequestsModal()" aria-label="待处理任务">
                     <i data-lucide="bell"></i>
                     <span class="navbar-icon-badge" id="navbarTaskBadge" {% if not pending_renewal_request_count %}hidden{% endif %}>{{ pending_renewal_request_count or 0 }}</span>
+                </button>
+                <button type="button" class="navbar-icon-btn navbar-style-btn" id="openStyleSwitcherBtn" aria-label="切换简约 / 卡通风格">
+                    <i data-lucide="sparkles" class="style-icon-cartoon"></i>
+                    <i data-lucide="square" class="style-icon-minimal"></i>
                 </button>
                 <button type="button" class="navbar-icon-btn navbar-theme-btn" id="openThemeSwitcherBtn" aria-label="切换主题">
                     <i data-lucide="sun" class="theme-icon-sun"></i>
@@ -1001,7 +1005,7 @@ eyJ..."></textarea>
     <div id="toast" class="toast"></div>
 
     <script>window.SYSTEM_UI_THEME = {{ ui_theme|default("ocean")|tojson }};</script>
-    <script src="/static/js/main.js?v=20260429-ui-style-toggle"></script>
+    <script src="/static/js/main.js?v=20260922-default-minimal"></script>
     <script>
         lucide.createIcons();
     </script>
