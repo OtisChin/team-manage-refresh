@@ -35,7 +35,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260922-style-switch">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260924-invite-bulk-revoke">
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
     {% block extra_css %}{% endblock %}
@@ -844,6 +844,22 @@ eyJ..."></textarea>
                 <button class="modal-close" onclick="hideModal('manageMembersModal')">&times;</button>
             </div>
             <div class="modal-body">
+                <!-- 批量操作进度：批量邀请与批量踢人共用，操作期间才显示 -->
+                <div id="memberBatchProgress" class="member-progress" aria-live="polite" aria-atomic="true">
+                    <div class="member-progress-head">
+                        <span class="member-progress-title" id="memberProgressTitle">正在处理</span>
+                        <span class="member-progress-head-right">
+                            <span class="member-progress-percent" id="memberProgressPercent">0%</span>
+                            <button type="button" class="member-progress-close" id="memberProgressClose"
+                                onclick="hideMemberProgress()" title="关闭" aria-label="关闭">&times;</button>
+                        </span>
+                    </div>
+                    <div class="member-progress-bar">
+                        <div class="member-progress-bar-inner" id="memberProgressBar"></div>
+                    </div>
+                    <div class="member-progress-text" id="memberProgressText">正在处理，请稍候…</div>
+                </div>
+
                 <!-- 添加成员表单 -->
                 <div class="content-section"
                     style="padding: 1.25rem; margin-bottom: 1.5rem; background: rgba(255,255,255,0.03);">
@@ -863,6 +879,20 @@ eyJ..."></textarea>
                             </select>
                             <small class="form-text">席位池先买后用，未加购的席型无法邀请。</small>
                         </div>
+                        <!-- 分批节奏就地可调：邮箱多时按批发、批间等待，避免一口气撞限流。
+                             这里改的值会落库（下次打开弹窗沿用），与系统设置页里是同一份。 -->
+                        <div class="form-group" style="width: 150px; margin-bottom: 0;">
+                            <label for="inviteBatchSizeInline">每批数量</label>
+                            <input type="number" id="inviteBatchSizeInline" class="form-control"
+                                min="1" max="50" step="1" value="25">
+                            <small class="form-text">上限 50</small>
+                        </div>
+                        <div class="form-group" style="width: 150px; margin-bottom: 0;">
+                            <label for="inviteBatchIntervalInline">批间等待 (秒)</label>
+                            <input type="number" id="inviteBatchIntervalInline" class="form-control"
+                                min="0" max="600" step="1" value="30">
+                            <small class="form-text">0 = 不等待</small>
+                        </div>
                         <button type="submit" class="btn btn-primary" id="addMemberSubmitBtn">
                             <i data-lucide="user-plus"></i> 发送邀请
                         </button>
@@ -877,6 +907,26 @@ eyJ..."></textarea>
                         <span class="kick-count-badge" id="timedKickCountBadge">
                             已选 <b id="timedKickSelectedCount">0</b> 个
                         </span>
+                    </div>
+
+                    <!-- 按邮箱批量选中：成员多时在长表里逐个找太费劲，粘一批邮箱直接勾上。
+                         勾选与下面的表格共用同一个集合，所以"一键踢出"对同一批人生效。 -->
+                    <div class="bulk-select-row">
+                        <textarea id="bulkSelectEmails" class="form-control" rows="2"
+                            placeholder="粘贴邮箱批量选中（换行、逗号或空格分隔）"></textarea>
+                        <div class="bulk-select-actions">
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                onclick="selectMembersByEmails()">
+                                <i data-lucide="check-check"></i> 按邮箱选中
+                            </button>
+                            <button type="button" class="btn btn-secondary btn-sm"
+                                onclick="clearTimedKickSelection()">清空选择</button>
+                            <button type="button" class="btn btn-danger btn-sm" id="bulkKickBtn"
+                                onclick="bulkKickSelected()">
+                                <i data-lucide="user-minus"></i> 一键踢出选中
+                            </button>
+                        </div>
+                        <div class="bulk-select-hint" id="bulkSelectHint"></div>
                     </div>
 
                     <div class="kick-time-row">
@@ -914,8 +964,23 @@ eyJ..."></textarea>
 
                 <!-- 已加入成员 -->
                 <div class="content-section" style="margin-bottom: 1.5rem;">
-                    <h4 style="margin-bottom: 1rem; color: var(--success);">已加入成员</h4>
-                    <div class="table-container" style="max-height: 250px; overflow: auto; margin: 0;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                        <h4 style="margin: 0; color: var(--success);">已加入成员</h4>
+                        <!-- 到期时间 = 该子号配置的具体踢出时刻（kick_at，精确到分）。
+                             选项由 JS 按当前列表里真实设置过的时刻生成，选哪个时刻就筛哪一批，
+                             不做"今天 / 7 天内"这类宽泛区间。筛选只改变可见行，不动已勾选集合。 -->
+                        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                            <label for="joinedExpiryFilter"
+                                style="font-size: 0.85rem; color: var(--text-muted);">到期时间</label>
+                            <select id="joinedExpiryFilter" class="form-control form-control-sm"
+                                style="width: auto; min-width: 15rem;" onchange="applyJoinedExpiryFilter()">
+                                <option value="all">全部</option>
+                            </select>
+                            <span id="joinedExpiryInfo"
+                                style="font-size: 0.85rem; color: var(--text-muted);"></span>
+                        </div>
+                    </div>
+                    <div class="table-container" style="max-height: 360px; overflow: auto; margin: 0;">
                         <table class="data-table">
                             <thead>
                                 <tr>
@@ -940,8 +1005,21 @@ eyJ..."></textarea>
 
                 <!-- 待加入成员 -->
                 <div class="content-section" style="margin: 0;">
-                    <h4 style="margin-bottom: 1rem; color: var(--warning);">待加入成员 (邀请中)</h4>
-                    <div class="table-container" style="max-height: 250px; overflow: auto; margin: 0;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                        <h4 style="margin: 0; color: var(--warning);">待加入成员 (邀请中)</h4>
+                        <!-- 撤回按钮只作用于勾选集合里"待加入"的那部分，已加入的成员不受影响，
+                             所以和上面的「一键踢出」共用同一份勾选也不会误伤 -->
+                        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                            <span class="kick-count-badge" id="inviteRevokeCountBadge">
+                                已选 <b id="inviteRevokeSelectedCount">0</b> 个
+                            </span>
+                            <button type="button" class="btn btn-warning btn-sm" id="bulkRevokeBtn"
+                                onclick="bulkRevokeSelectedInvites()" disabled>
+                                <i data-lucide="undo-2"></i> 一键撤回选中
+                            </button>
+                        </div>
+                    </div>
+                    <div class="table-container" style="max-height: 360px; overflow: auto; margin: 0;">
                         <table class="data-table">
                             <thead>
                                 <tr>
@@ -1005,7 +1083,9 @@ eyJ..."></textarea>
     <div id="toast" class="toast"></div>
 
     <script>window.SYSTEM_UI_THEME = {{ ui_theme|default("ocean")|tojson }};</script>
-    <script src="/static/js/main.js?v=20260922-default-minimal"></script>
+    <!-- 改 main.js 后必须同步改这里的版本号：模板每次请求都会重渲染，而脚本走缓存，
+         版本号不变就会出现"新模板 + 旧脚本"的半新半旧故障（曾导致筛选项始终为空） -->
+    <script src="/static/js/main.js?v=20260924-invite-bulk-revoke"></script>
     <script>
         lucide.createIcons();
     </script>

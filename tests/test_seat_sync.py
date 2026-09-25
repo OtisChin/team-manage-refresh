@@ -244,10 +244,12 @@ class SendInviteSeatTypeTests(unittest.IsolatedAsyncioTestCase):
     def _capture(service):
         captured = {}
 
-        async def fake_make_request(method, url, headers, json_data=None, db_session=None, identifier="default"):
+        async def fake_make_request(method, url, headers, json_data=None, db_session=None,
+                                    identifier="default", timeout=None):
             captured["method"] = method
             captured["url"] = url
             captured["json"] = json_data
+            captured["timeout"] = timeout
             return {"success": True, "data": {"account_invites": [], "errored_emails": []}, "error": None}
 
         service._make_request = fake_make_request
@@ -268,6 +270,9 @@ class SendInviteSeatTypeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["resend_emails"])
         self.assertTrue(body["flow_id"])
         self.assertTrue(body["submission_id"])
+        # 邀请接口服务端要 ~29s 才回，必须用放宽的专用超时，
+        # 否则每次都会先撞会话默认的 30s 超时再重发一遍。
+        self.assertEqual(captured["timeout"], ChatGPTService.INVITE_REQUEST_TIMEOUT)
 
     async def test_invite_defaults_to_standard_seat(self):
         service = ChatGPTService()
@@ -534,6 +539,51 @@ class FallbackMaxMembersTests(unittest.IsolatedAsyncioTestCase):
                 await self.service._get_fallback_max_members(None),
                 TeamService.DEFAULT_TEAM_MAX_MEMBERS,
             )
+
+
+class ProliteSeatStatsTests(unittest.IsolatedAsyncioTestCase):
+    """控制台「高级席位总数 / 高级席位已占」只统计可用账号。
+
+    异常账号（error/expired/banned）的席位既分配不出去、也进不了可分配池，
+    计进总数只会把池子撑得好看，与实际能放出去的高级席位不符。
+    """
+
+    async def asyncSetUp(self):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from app.database import Base
+
+        self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
+
+    async def asyncTearDown(self):
+        await self.engine.dispose()
+
+    async def _add_team(self, status, total, assigned):
+        async with self.session_factory() as session:
+            session.add(Team(
+                email=f"{status}@example.com",
+                access_token_encrypted="x",
+                status=status,
+                seats_prolite_total=total,
+                seats_prolite_assigned=assigned,
+            ))
+            await session.commit()
+
+    async def test_only_usable_teams_count_toward_prolite_seats(self):
+        await self._add_team("active", 2, 1)
+        await self._add_team("full", 3, 3)
+        await self._add_team("error", 5, 5)
+        await self._add_team("expired", 4, 4)
+        await self._add_team("banned", 6, 6)
+
+        async with self.session_factory() as session:
+            stats = await TeamService().get_stats(session)
+
+        self.assertEqual(stats["prolite_seats_total"], 5)
+        self.assertEqual(stats["prolite_seats_assigned"], 4)
 
 
 if __name__ == "__main__":

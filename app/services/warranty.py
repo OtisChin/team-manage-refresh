@@ -32,7 +32,7 @@ TIMED_KICK_SOURCE = "auto_kick_timed"
 
 # 批量踢人时，两次操作之间的随机等待范围（秒）。
 # 目的是把连续请求分散开，避免短时间内对同一工作区高频调用被风控。
-DEFAULT_KICK_INTERVAL_MIN_SECONDS = 10
+DEFAULT_KICK_INTERVAL_MIN_SECONDS = 15
 DEFAULT_KICK_INTERVAL_MAX_SECONDS = 20
 MAX_KICK_INTERVAL_SECONDS = 600
 KICK_INTERVAL_SETTING_MIN = "kick_interval_min_seconds"
@@ -1900,7 +1900,7 @@ class WarrantyService:
         """批量踢出时在两次操作之间随机等待，把请求节奏分散开。
 
         服务端对同一工作区的连续成员变更比较敏感，批量踢人时逐个紧挨着调用
-        容易触发风控；这里按配置的区间随机等待（默认 10~20 秒）。
+        容易触发风控；这里按配置的区间随机等待（默认 15~20 秒）。
         区间上限配成 0 就完全不做等待。
         """
         min_seconds, max_seconds = await self.get_kick_interval_range(db_session)

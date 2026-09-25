@@ -17,10 +17,16 @@ from pydantic import BaseModel, Field
 
 from app.database import AsyncSessionLocal, get_db
 from app.dependencies.auth import require_admin
-from app.services.team import TeamService, is_timed_kick_enabled
+from app.services.team import (
+    TeamService,
+    is_timed_kick_enabled,
+    DEFAULT_INVITE_BATCH_SIZE,
+    DEFAULT_INVITE_BATCH_INTERVAL_SECONDS,
+    MAX_INVITE_BATCH_INTERVAL_SECONDS,
+)
 from app.services.redemption import RedemptionService
 from app.services.warranty import warranty_service
-from app.services.chatgpt import chatgpt_service
+from app.services.chatgpt import ChatGPTService, chatgpt_service
 from app.services.settings import (
     settings_service,
     DEFAULT_WARRANTY_EXPIRATION_MODE,
@@ -136,7 +142,7 @@ class AddMemberRequest(BaseModel):
 
 
 class DeleteMemberRequest(BaseModel):
-    """删除成员请求"""
+    """踢出成员请求"""
     email: Optional[str] = Field(None, description="成员邮箱")
 
 
@@ -146,6 +152,14 @@ class AddMembersRequest(BaseModel):
     seat_type: str = Field(
         "default",
         description="目标席型: default=普通席位(Standard) / prolite=高级席位(Premium)",
+    )
+    # 邀请表单里就地可调的分批节奏。传了就写回全局配置（下次打开弹窗沿用），
+    # 不传则用系统设置里已有的值——所以老调用方不受影响。
+    invite_batch_size: Optional[int] = Field(
+        None, ge=1, le=50, description="每批邀请的邮箱数；不传则用系统设置里的值"
+    )
+    invite_batch_interval_seconds: Optional[float] = Field(
+        None, ge=0, le=600, description="相邻两批之间的等待秒数；不传则用系统设置里的值"
     )
 
 
@@ -174,6 +188,22 @@ class KickIntervalSettingsRequest(BaseModel):
     kick_interval_max_seconds: float = Field(
         20, ge=0, le=600,
         description="批量踢人时两次操作之间的最大随机间隔（秒）；0 表示不等待",
+    )
+
+
+class InviteBatchSettingsRequest(BaseModel):
+    """批量邀请的分批请求。
+
+    一次邀请上百个邮箱时，官方接口单次能带的邮箱数有上限，一口气发出去也容易
+    撞限流；这里控制"每批多少邮箱"与"批间等多久"。
+    """
+    invite_batch_size: int = Field(
+        25, ge=1, le=50,
+        description="每批邀请的邮箱数；上限为官方单次请求可带的邮箱数",
+    )
+    invite_batch_interval_seconds: float = Field(
+        30, ge=0, le=600,
+        description="相邻两批之间的等待秒数；0 表示不等待",
     )
 
 
@@ -943,13 +973,24 @@ async def add_team_member(
             f"管理员批量添加成员到 Team {team_id} (席型={member_data.seat_type}): {member_data.emails}"
         )
 
+        # 邀请表单里就地带的分批参数：传了就落库，这样本轮的批次划分与下次打开
+        # 弹窗回填的值都跟着走，不用再跑去系统设置页改一遍。
+        batch_updates = {}
+        if member_data.invite_batch_size is not None:
+            batch_updates["invite_batch_size"] = str(member_data.invite_batch_size)
+        if member_data.invite_batch_interval_seconds is not None:
+            batch_updates["invite_batch_interval_seconds"] = str(
+                member_data.invite_batch_interval_seconds
+            )
+        if batch_updates:
+            await settings_service.update_settings(db, batch_updates)
+
         result = await team_service.add_team_members(
             team_id=team_id,
             emails=member_data.emails,
             db_session=db,
             seat_type=member_data.seat_type,
         )
-
         if not result.get("processed") and not result["success"]:
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1036,7 +1077,7 @@ async def delete_team_member(
         删除结果
     """
     try:
-        logger.info(f"管理员从 Team {team_id} 删除成员: {user_id}")
+        logger.info(f"管理员从 Team {team_id} 踢出成员: {user_id}")
 
         result = await team_service.delete_team_member(
             team_id=team_id,
@@ -1054,12 +1095,12 @@ async def delete_team_member(
         return JSONResponse(content=result)
 
     except Exception as e:
-        logger.exception("删除成员失败")
+        logger.exception("踢出成员失败")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "success": False,
-                "error": "删除成员失败，请稍后重试"
+                "error": "踢出成员失败，请稍后重试"
             }
         )
 
@@ -2369,8 +2410,10 @@ async def settings_page(
             "auto_kick_admin_invited_enabled": await settings_service.get_setting(db, "auto_kick_admin_invited_enabled", "false"),
             "auto_kick_admin_invited_enabled_since": await settings_service.get_setting(db, "auto_kick_admin_invited_enabled_since", ""),
             "auto_kick_admin_invited_period_days": await settings_service.get_setting(db, "auto_kick_admin_invited_period_days", "30"),
-            "kick_interval_min_seconds": await settings_service.get_setting(db, "kick_interval_min_seconds", "10"),
+            "kick_interval_min_seconds": await settings_service.get_setting(db, "kick_interval_min_seconds", "15"),
             "kick_interval_max_seconds": await settings_service.get_setting(db, "kick_interval_max_seconds", "20"),
+            "invite_batch_size": await settings_service.get_setting(db, "invite_batch_size", "25"),
+            "invite_batch_interval_seconds": await settings_service.get_setting(db, "invite_batch_interval_seconds", "30"),
             "timed_kick_enabled": await settings_service.get_setting(db, "timed_kick_enabled", "false"),
             "timed_kick_interval_minutes": await settings_service.get_setting(db, "timed_kick_interval_minutes", "1"),
             "timed_kick_grace_minutes": await settings_service.get_setting(db, "timed_kick_grace_minutes", "5"),
@@ -3411,6 +3454,82 @@ async def update_kick_interval_settings(
         })
     except Exception:
         logger.exception("更新批量踢出间隔失败")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"success": False, "error": "更新失败，请稍后重试"}
+        )
+
+
+@router.get("/settings/invite-batch")
+async def get_invite_batch_settings(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin)
+):
+    """读取批量邀请的分批配置，供成员弹窗打开时回填输入框。"""
+    size_raw = await settings_service.get_setting(
+        db, "invite_batch_size", str(DEFAULT_INVITE_BATCH_SIZE)
+    )
+    interval_raw = await settings_service.get_setting(
+        db, "invite_batch_interval_seconds", str(DEFAULT_INVITE_BATCH_INTERVAL_SECONDS)
+    )
+    try:
+        batch_size = int(float(size_raw))
+    except (TypeError, ValueError):
+        batch_size = DEFAULT_INVITE_BATCH_SIZE
+    try:
+        interval_seconds = float(interval_raw)
+    except (TypeError, ValueError):
+        interval_seconds = float(DEFAULT_INVITE_BATCH_INTERVAL_SECONDS)
+
+    return JSONResponse(content={
+        "invite_batch_size": batch_size,
+        "invite_batch_interval_seconds": interval_seconds,
+    })
+
+
+@router.post("/settings/invite-batch")
+async def update_invite_batch_settings(
+    invite_batch_data: InviteBatchSettingsRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_admin)
+):
+    """更新批量邀请的分批配置。
+
+    一次邀请很多邮箱时，按这里配置的批次大小分批发，批与批之间等待指定秒数，
+    避免连续请求把官方限流撞出来。
+    """
+    try:
+        ceiling = max(int(ChatGPTService.MAX_INVITE_BATCH_SIZE or 1), 1)
+        batch_size = int(invite_batch_data.invite_batch_size or 0)
+        # 配得比官方单次上限大不会报错，但整批请求会被服务端拒掉，所以压回上限
+        batch_size = max(1, min(batch_size, ceiling))
+        interval_seconds = float(invite_batch_data.invite_batch_interval_seconds or 0)
+        interval_seconds = max(0.0, min(600.0, interval_seconds))
+
+        logger.info(
+            "管理员更新批量邀请分批配置: batch_size=%s, interval=%ss",
+            batch_size,
+            interval_seconds,
+        )
+
+        await settings_service.update_settings(db, {
+            "invite_batch_size": str(batch_size),
+            "invite_batch_interval_seconds": str(interval_seconds),
+        })
+
+        if interval_seconds <= 0:
+            message = f"批量邀请已设为每批 {batch_size} 个、批间不等待"
+        else:
+            message = f"批量邀请已设为每批 {batch_size} 个，批间隔 {interval_seconds:g} 秒"
+
+        return JSONResponse(content={
+            "success": True,
+            "message": message,
+            "invite_batch_size": batch_size,
+            "invite_batch_interval_seconds": interval_seconds,
+        })
+    except Exception:
+        logger.exception("更新批量邀请分批配置失败")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"success": False, "error": "更新失败，请稍后重试"}

@@ -509,11 +509,19 @@ class BatchKickIntervalTests(_TimedKickBase):
 
         self.assertEqual((min_seconds, max_seconds), (5.0, 30.0))
 
-    async def test_interval_range_defaults_to_10_20(self):
+    async def test_interval_range_defaults_to_15_20(self):
+        """未显式配置批量踢出间隔时的产品默认值。
+
+        这个默认值同时落在四处，改动必须一起动，否则设置页显示与实际行为不一致：
+        app/services/warranty.py 的 DEFAULT_KICK_INTERVAL_*、
+        app/routes/admin.py 读取设置时的兜底字符串、
+        app/templates/admin/settings/index.html 的输入框初值与帮助文案、
+        init_db.py 写入的默认设置。
+        """
         async with self.session_factory() as session:
             min_seconds, max_seconds = await self.warranty.get_kick_interval_range(session)
 
-        self.assertEqual((min_seconds, max_seconds), (10.0, 20.0))
+        self.assertEqual((min_seconds, max_seconds), (15.0, 20.0))
 
 
 class TeamUnavailableKickTests(_TimedKickBase):

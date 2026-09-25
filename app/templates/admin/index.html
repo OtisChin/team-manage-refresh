@@ -784,14 +784,16 @@
             </div>
         </div>
         {% endif %}
-        <div class="stat-card stat-info">
+        <div class="stat-card stat-info"
+            title="只统计可用账号（active/full）：异常账号（error/expired/banned）的高级席位分配不出去，不计入。">
             <div class="stat-icon"><i data-lucide="gem"></i></div>
             <div class="stat-info-group">
                 <div class="stat-value">{{ stats.prolite_seats_total }}</div>
                 <div class="stat-label">高级席位总数</div>
             </div>
         </div>
-        <div class="stat-card stat-warning">
+        <div class="stat-card stat-warning"
+            title="只统计可用账号（active/full）上已分配出去的高级席位；异常账号不计入。">
             <div class="stat-icon"><i data-lucide="user-check"></i></div>
             <div class="stat-info-group">
                 <div class="stat-value">{{ stats.prolite_seats_assigned }}</div>

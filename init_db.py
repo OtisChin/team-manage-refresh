@@ -126,13 +126,23 @@ async def create_default_settings():
             ),
             Setting(
                 key="kick_interval_min_seconds",
-                value="10",
+                value="15",
                 description="批量踢人时两次操作之间的最小随机间隔（秒）"
             ),
             Setting(
                 key="kick_interval_max_seconds",
                 value="20",
                 description="批量踢人时两次操作之间的最大随机间隔（秒）"
+            ),
+            Setting(
+                key="invite_batch_size",
+                value="25",
+                description="批量邀请时每批发出的邮箱数（上限为官方单次请求可带数）"
+            ),
+            Setting(
+                key="invite_batch_interval_seconds",
+                value="30",
+                description="批量邀请时相邻两批之间的等待秒数（0 表示不等待）"
             ),
         ]
 

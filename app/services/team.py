@@ -5,7 +5,7 @@ Team 管理服务
 import logging
 import json
 import asyncio
-from typing import Optional, Dict, Any, List, Set
+from typing import Optional, Dict, Any, List, Sequence, Set
 from datetime import datetime, timedelta
 import pytz
 from sqlalchemy import select, update, delete, func, or_, case
@@ -31,6 +31,15 @@ ACTIVE_TEAM_EMAIL_STATUSES = (
     TEAM_EMAIL_STATUS_INVITED,
     TEAM_EMAIL_STATUS_JOINED,
 )
+
+# 批量邀请的分批节奏。官方单次邀请请求能带的邮箱数有上限（见
+# ChatGPTService.MAX_INVITE_BATCH_SIZE），一次把上百个邮箱丢过去既容易撞限流，
+# 也不好观察进度；改成按可配置的批次大小分批发，每批之间固定等待，把请求节奏摊开。
+DEFAULT_INVITE_BATCH_SIZE = 25
+DEFAULT_INVITE_BATCH_INTERVAL_SECONDS = 30
+MAX_INVITE_BATCH_INTERVAL_SECONDS = 600
+INVITE_BATCH_SIZE_SETTING = "invite_batch_size"
+INVITE_BATCH_INTERVAL_SETTING = "invite_batch_interval_seconds"
 
 
 async def is_timed_kick_enabled(db_session: AsyncSession) -> bool:
@@ -393,6 +402,26 @@ class TeamService:
         # 3. 判定是否为 Token 过期 (需刷新)
         is_token_expired = error_code == "token_expired" or "token_expired" in error_msg or "token is expired" in error_msg
         
+        # 3. 限流不是故障：官方对同一工作区的并发变更会回 429
+        # ("Another subscription update is in progress")，那只是在让我们等一下。
+        # 这类响应一旦累加 error_count，连续几次就会把正常 Team 判成 error，
+        # 之后它的邀请/踢人都会被整体跳过——等于自己把账号打成"异常"。
+        rate_limit_keywords = [
+            "another subscription update",
+            "too many requests",
+            "rate limit",
+            "slow down",
+        ]
+        if result.get("status_code") == 429 or any(kw in error_msg for kw in rate_limit_keywords):
+            logger.warning(
+                "Team %s (%s) 被限流 (code=%s, msg=%s)，本轮不累加错误计数",
+                team.id,
+                team.email,
+                error_code,
+                error_msg,
+            )
+            return False
+
         # 4. 处理其他所有非致命错误 (累加错误次数)
         # 只要走到这里，说明不是封号也不是满员，统统记录错误
         logger.warning(f"Team {team.id} ({team.email}) 请求出错 (code={error_code}, msg={error_msg})")
@@ -2742,6 +2771,7 @@ class TeamService:
         db_session: AsyncSession,
         seat_type: str = ChatGPTService.SEAT_TYPE_DEFAULT,
         member_emails_snapshot: Optional[Set[str]] = None,
+        prefetched_invite_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         添加 Team 成员
@@ -2860,15 +2890,19 @@ class TeamService:
             existing_mapping_status = mapping_result.scalar_one_or_none()
             had_active_mapping = existing_mapping_status in ACTIVE_TEAM_EMAIL_STATUSES
 
-            # 4. 调用 ChatGPT API 发送邀请
-            invite_result = await self.chatgpt_service.send_invite(
-                access_token,
-                team.account_id,
-                normalized_email,
-                db_session,
-                identifier=team.email,
-                seat_type=normalized_seat_type,
-            )
+            # 4. 发送邀请。批量邀请时调用方已经把整批发出去并把结果透传进来，
+            #    这里只做后续的状态与映射处理，不再重复发请求。
+            if prefetched_invite_result is not None:
+                invite_result = prefetched_invite_result
+            else:
+                invite_result = await self.chatgpt_service.send_invite(
+                    access_token,
+                    team.account_id,
+                    normalized_email,
+                    db_session,
+                    identifier=team.email,
+                    seat_type=normalized_seat_type,
+                )
 
             if not invite_result["success"]:
                 # 检查是否封号或 Token 失效
@@ -2927,17 +2961,20 @@ class TeamService:
             # 并把整个 Team 标记为 error，即便邮件实际已经发到客户邮箱。
             # 这里改成后台校验，与兑换码邀请保持同样行为：HTTP 立即返回，后台 15s 内
             # 仍未见到该邮箱才标记 ghost_success。
-            try:
-                bg_task = asyncio.create_task(
-                    self._background_verify_admin_invite(team_id, normalized_email)
-                )
-                # 强引用避免 GC 提前回收 Task；任务结束后自动从集合移除。
-                self._background_tasks.add(bg_task)
-                bg_task.add_done_callback(self._background_tasks.discard)
-            except RuntimeError:
-                logger.warning(
-                    f"无法调度后台校验任务 (team={team_id}, email={normalized_email})"
-                )
+            # 批量路径（prefetched_invite_result 有值）由 add_team_members 在整批结束后
+            # 统一调度一次校验：否则 N 个邮箱各起一个后台任务、各自拉一遍全量成员。
+            if prefetched_invite_result is None:
+                try:
+                    bg_task = asyncio.create_task(
+                        self._background_verify_admin_invite(team_id, normalized_email)
+                    )
+                    # 强引用避免 GC 提前回收 Task；任务结束后自动从集合移除。
+                    self._background_tasks.add(bg_task)
+                    bg_task.add_done_callback(self._background_tasks.discard)
+                except RuntimeError:
+                    logger.warning(
+                        f"无法调度后台校验任务 (team={team_id}, email={normalized_email})"
+                    )
 
             return {
                 "success": True,
@@ -2963,11 +3000,17 @@ class TeamService:
     _ADMIN_INVITE_VERIFY_INTERVAL_SECONDS = 5
 
     async def _background_verify_admin_invite(self, team_id: int, email: str) -> None:
-        """后台异步校验后台手工邀请是否真正下发。
+        """单个邮箱的后台校验（单发邀请路径用）。"""
+        await self._background_verify_admin_invites(team_id, [email])
+
+    async def _background_verify_admin_invites(
+        self, team_id: int, emails: Sequence[str]
+    ) -> None:
+        """后台异步校验一批邀请是否真正下发。
 
         策略：邀请请求返回成功后，每 5s 轮询一次 Team 成员列表，最多 60s。
-        - 见到该邮箱即结束
-        - 60s 内未见到只 logger.error 留痕，**不再把 Team 标记为 error**：
+        - 整批共用一个校验任务、每轮只同步一次，全部见到即结束
+        - 60s 内仍有缺席只 logger.error 留痕，**不再把 Team 标记为 error**：
           OpenAI 实际丢邀请的 ghost_success 是极少数情况，而列表延迟更常见。
           本地 team_email_mapping 已经记录 is_admin_invited=True 兜底，下次扫描
           仍会保护该成员；真要是邀请被丢，missing_sync_count 机制会在多轮扫描
@@ -2976,40 +3019,127 @@ class TeamService:
         # 延迟 import 防止循环引用
         from app.database import AsyncSessionLocal
 
-        normalized_email = (email or "").lower()
+        normalized_pending = {item.lower() for item in (emails or []) if item}
+        if not normalized_pending:
+            return
+
         attempts = self._ADMIN_INVITE_VERIFY_ATTEMPTS
         interval = self._ADMIN_INVITE_VERIFY_INTERVAL_SECONDS
+        total = len(normalized_pending)
         async with AsyncSessionLocal() as db_session:
             try:
-                is_verified = False
                 for i in range(attempts):
                     await asyncio.sleep(interval)
                     sync_res = await self.sync_team_info(team_id, db_session)
-                    member_emails = [m.lower() for m in sync_res.get("member_emails", [])]
-                    if normalized_email in member_emails:
-                        is_verified = True
+                    member_emails = {m.lower() for m in sync_res.get("member_emails", [])}
+                    confirmed = normalized_pending & member_emails
+                    if confirmed:
+                        normalized_pending -= confirmed
                         logger.info(
-                            f"Team {team_id} [admin_invite_bg] 同步确认成功 "
+                            f"Team {team_id} [admin_invite_bg] 同步确认 "
+                            f"{total - len(normalized_pending)}/{total} 个邀请已出现在成员列表 "
                             f"(尝试第 {i+1}/{attempts} 次, 用时 ~{(i+1)*interval}s)"
                         )
+                    if not normalized_pending:
                         break
                     if i < attempts - 1:
                         logger.info(
-                            f"Team {team_id} [admin_invite_bg] 尚未见到成员 {normalized_email}，"
+                            f"Team {team_id} [admin_invite_bg] 尚未见到 {len(normalized_pending)} 个成员，"
                             f"准备第 {i+2}/{attempts} 次重试..."
                         )
 
-                if not is_verified:
+                if normalized_pending:
                     # 仅记录日志，不翻 Team 状态。
                     # 之前的 _handle_api_error(ghost_success) 会把 Team 标为 error，
                     # 但实际上列表延迟比真正 ghost_success 常见得多，会造成大量误报。
                     logger.error(
                         f"Team {team_id} [admin_invite_bg] {attempts*interval}s 内仍未在成员列表中"
-                        f"看到 {normalized_email}。本地 mapping 已记录 admin_invited，"
-                        f"等待后续同步或人工核查（不自动翻 Team 状态）"
+                        f"看到 {len(normalized_pending)} 个成员: {sorted(normalized_pending)}。"
+                        f"本地 mapping 已记录 admin_invited，等待后续同步或人工核查（不自动翻 Team 状态）"
                     )
             except Exception as exc:
-                logger.error(f"后台邀请校验发生异常 (team={team_id}, email={normalized_email}): {exc}")
+                logger.error(
+                    f"后台邀请校验发生异常 (team={team_id}, 待确认 {len(normalized_pending)} 个): {exc}"
+                )
+
+    @staticmethod
+    def _normalize_invite_batch_size(raw: Any, default: int) -> int:
+        """把配置里的批次大小收敛到 [1, 官方单次上限]。"""
+        try:
+            value = int(float(str(raw).strip()))
+        except (TypeError, ValueError):
+            value = default
+        ceiling = max(int(ChatGPTService.MAX_INVITE_BATCH_SIZE or 1), 1)
+        return max(1, min(value, ceiling))
+
+    @staticmethod
+    def _normalize_invite_batch_interval(raw: Any, default: float) -> float:
+        """把批次间隔收敛到 [0, MAX_INVITE_BATCH_INTERVAL_SECONDS]，0 表示不等待。"""
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            value = default
+        return max(0.0, min(float(MAX_INVITE_BATCH_INTERVAL_SECONDS), value))
+
+    async def get_invite_batch_config(self, db_session: AsyncSession) -> tuple[int, float]:
+        """读取批量邀请的分批配置：(每批邮箱数, 批间等待秒数)。
+
+        批次大小会被官方单次上限封顶——配得比上限大不会报错，但整批请求会被
+        服务端拒掉，所以这里直接压回可用的最大值。
+        """
+        size_raw = await settings_service.get_setting(
+            db_session, INVITE_BATCH_SIZE_SETTING, str(DEFAULT_INVITE_BATCH_SIZE)
+        )
+        interval_raw = await settings_service.get_setting(
+            db_session,
+            INVITE_BATCH_INTERVAL_SETTING,
+            str(DEFAULT_INVITE_BATCH_INTERVAL_SECONDS),
+        )
+        return (
+            self._normalize_invite_batch_size(size_raw, DEFAULT_INVITE_BATCH_SIZE),
+            self._normalize_invite_batch_interval(
+                interval_raw, DEFAULT_INVITE_BATCH_INTERVAL_SECONDS
+            ),
+        )
+
+    async def _send_invite_batch(
+        self,
+        team_id: int,
+        emails: List[str],
+        seat_type: str,
+        db_session: AsyncSession,
+    ) -> Dict[str, Any]:
+        """为一批邮箱发一次邀请请求，返回整批共用的原始结果。
+
+        结果会原样透传给 ``add_team_member``（``prefetched_invite_result``），
+        由每个邮箱各自完成状态判定与映射落库，避免把那套逻辑复制一遍。
+        """
+        team = await db_session.get(Team, team_id)
+        if not team:
+            return {
+                "success": False,
+                "status_code": 0,
+                "error": f"未找到 ID 为 {team_id} 的 Team",
+                "error_code": "team_not_found",
+            }
+
+        access_token = await self.ensure_access_token(team, db_session)
+        if not access_token:
+            return {
+                "success": False,
+                "status_code": 0,
+                "error": "该 Team 的登录凭证已过期，且自动刷新失败，请重新登录或重新导入",
+                "error_code": "token_refresh_failed",
+            }
+
+        return await self.chatgpt_service.send_invites_bulk(
+            access_token,
+            team.account_id,
+            emails,
+            db_session,
+            identifier=team.email,
+            seat_type=seat_type,
+        )
 
     async def add_team_members(
         self,
@@ -3163,57 +3293,105 @@ class TeamService:
             "token_invalidated",
         }
 
-        for normalized_email in queued_emails:
-            if stop_processing:
-                summary["not_processed"] += 1
-                results.append({
-                    "email": normalized_email,
-                    "success": False,
-                    "status": "not_processed",
-                    "message": None,
-                    "error": "处理过程中 Team 状态异常，后续邮箱未继续执行",
-                })
-                continue
-
-            item_result = await self.add_team_member(
-                team_id,
-                normalized_email,
-                db_session,
-                seat_type=normalized_seat_type,
-                # 开头已经同步过一次，循环里维护快照即可；
-                # 否则每个邮箱都要再拉一遍全量成员（实测约 5 秒）。
-                member_emails_snapshot=existing_emails,
+        # 邀请本身是批量的：接口的 email_addresses 就是数组，一次请求能带多个邮箱。
+        # 但一次丢太多既容易撞限流，也不方便观察进度，所以按可配置的批次大小分批发，
+        # 每批之间固定等待；批内再逐条走 add_team_member 做状态与映射处理
+        # （那里拿到批结果就不再重复发请求）。
+        batch_size, batch_interval = await self.get_invite_batch_config(db_session)
+        total_batches = (len(queued_emails) + batch_size - 1) // batch_size if queued_emails else 0
+        if total_batches > 1:
+            logger.info(
+                "批量邀请：共 %d 个邮箱，按每批 %d 个分成 %d 批，批间隔 %.0fs",
+                len(queued_emails), batch_size, total_batches, batch_interval,
             )
-            item_status = item_result.get("status") or ("invited" if item_result.get("success") else "failed")
-            item_message = item_result.get("message")
-            item_error = item_result.get("error")
-            item_email = item_result.get("email") or normalized_email
+        # 本轮真正新下发的邀请，整批结束后统一做一次后台校验（而不是每邮箱一个任务）
+        invited_emails: List[str] = []
 
-            if item_status == "already_exists":
-                summary["already_exists"] += 1
-            elif item_result.get("success") and item_status == "invited":
-                summary["invited"] += 1
-            elif item_result.get("error_code") in ("team_full", "seat_type_full", "seat_type_unavailable"):
-                summary["no_seat"] += 1
-                item_status = "no_seat"
-                item_error = item_error or "Team 剩余席位不足"
-            else:
-                summary["failed"] += 1
+        for batch_index, batch_start in enumerate(range(0, len(queued_emails), batch_size)):
+            batch_emails = queued_emails[batch_start:batch_start + batch_size]
 
-            results.append({
-                "email": item_email,
-                "success": bool(item_result.get("success")),
-                "status": item_status,
-                "message": item_message,
-                "error": item_error,
-            })
+            # 第一批立即发；之后每批之前先等一下，把连续请求的节奏摊开
+            if batch_index > 0 and batch_interval > 0 and not stop_processing:
+                logger.info(
+                    "批量邀请：等待 %.0fs 后发送第 %d/%d 批（%d 个邮箱）",
+                    batch_interval, batch_index + 1, total_batches, len(batch_emails),
+                )
+                await asyncio.sleep(batch_interval)
 
-            # 邀请已下发（或本来就在），把邮箱并入快照，后面的重复判断不必再回源
-            if item_result.get("success"):
-                existing_emails.add(normalized_email)
+            batch_invite_result: Optional[Dict[str, Any]] = None
+            if not stop_processing:
+                batch_invite_result = await self._send_invite_batch(
+                    team_id, batch_emails, normalized_seat_type, db_session
+                )
 
-            if item_result.get("error_code") in fatal_error_codes:
-                stop_processing = True
+            for normalized_email in batch_emails:
+                if stop_processing:
+                    summary["not_processed"] += 1
+                    results.append({
+                        "email": normalized_email,
+                        "success": False,
+                        "status": "not_processed",
+                        "message": None,
+                        "error": "处理过程中 Team 状态异常，后续邮箱未继续执行",
+                    })
+                    continue
+
+                item_result = await self.add_team_member(
+                    team_id,
+                    normalized_email,
+                    db_session,
+                    seat_type=normalized_seat_type,
+                    # 开头已经同步过一次，循环里维护快照即可；
+                    # 否则每个邮箱都要再拉一遍全量成员（实测约 5 秒）。
+                    member_emails_snapshot=existing_emails,
+                    # 整批邀请已经发出，这里只负责状态与映射落库
+                    prefetched_invite_result=batch_invite_result,
+                )
+                item_status = item_result.get("status") or ("invited" if item_result.get("success") else "failed")
+                item_message = item_result.get("message")
+                item_error = item_result.get("error")
+                item_email = item_result.get("email") or normalized_email
+
+                if item_status == "already_exists":
+                    summary["already_exists"] += 1
+                elif item_result.get("success") and item_status == "invited":
+                    summary["invited"] += 1
+                    invited_emails.append(normalized_email)
+                elif item_result.get("error_code") in ("team_full", "seat_type_full", "seat_type_unavailable"):
+                    summary["no_seat"] += 1
+                    item_status = "no_seat"
+                    item_error = item_error or "Team 剩余席位不足"
+                else:
+                    summary["failed"] += 1
+
+                results.append({
+                    "email": item_email,
+                    "success": bool(item_result.get("success")),
+                    "status": item_status,
+                    "message": item_message,
+                    "error": item_error,
+                })
+
+                # 邀请已下发（或本来就在），把邮箱并入快照，后面的重复判断不必再回源
+                if item_result.get("success"):
+                    existing_emails.add(normalized_email)
+
+                if item_result.get("error_code") in fatal_error_codes:
+                    stop_processing = True
+
+        # 整批处理完只调度一次后台校验：一次同步能同时确认所有邮箱，
+        # 比每个邮箱各起一个任务各自轮询成员列表省下 N 倍请求。
+        if invited_emails:
+            try:
+                bg_task = asyncio.create_task(
+                    self._background_verify_admin_invites(team_id, invited_emails)
+                )
+                self._background_tasks.add(bg_task)
+                bg_task.add_done_callback(self._background_tasks.discard)
+            except RuntimeError:
+                logger.warning(
+                    f"无法调度后台批量邀请校验任务 (team={team_id}, 共 {len(invited_emails)} 个)"
+                )
 
         invited_count = summary["invited"]
         failed_count = summary["invalid"] + summary["duplicate"] + summary["already_exists"] + summary["no_seat"] + summary["failed"] + summary["not_processed"]
@@ -3432,7 +3610,7 @@ class TeamService:
                     "该 Team 的登录凭证已过期，且自动刷新失败，请重新登录或重新导入",
                 )
 
-            # 3. 调用 ChatGPT API 删除成员
+            # 3. 调用 ChatGPT API 踢出成员
             delete_result = await self.chatgpt_service.delete_member(
                 access_token,
                 team.account_id,
@@ -3459,7 +3637,7 @@ class TeamService:
                 return {
                     "success": False,
                     "message": None,
-                    "error": f"删除成员失败: {delete_result['error']}"
+                    "error": f"踢出成员失败: {delete_result['error']}"
                 }
 
             if email:
@@ -3470,24 +3648,24 @@ class TeamService:
 
             await db_session.commit()
 
-            logger.info(f"删除成员成功: {user_id} from Team {team_id}")
+            logger.info(f"踢出成员成功: {user_id} from Team {team_id}")
 
             # 5. 请求成功，重置错误状态
             await self._reset_error_status(team, db_session)
 
             return {
                 "success": True,
-                "message": "成员已删除",
+                "message": "成员已踢出",
                 "error": None
             }
 
         except Exception:
             await db_session.rollback()
-            logger.exception("删除成员失败")
+            logger.exception("踢出成员失败")
             return {
                 "success": False,
                 "message": None,
-                "error": "删除成员失败，请稍后重试"
+                "error": "踢出成员失败，请稍后重试"
             }
 
     async def enable_device_code_auth(
@@ -3842,7 +4020,7 @@ class TeamService:
         db_session: AsyncSession
     ) -> Dict[str, Any]:
         """
-        撤回邀请或删除成员 (根据邮箱自动判断)
+        撤回邀请或踢出成员 (根据邮箱自动判断)
 
         Args:
             team_id: Team ID
@@ -3872,17 +4050,17 @@ class TeamService:
                 # 即使没找到也返回成功，以便上层逻辑继续更新记录
                 return {"success": True, "message": "成员已不存在"}
 
-            # 3. 根据状态执行删除
+            # 3. 根据状态执行处理
             if target["status"] == "joined":
-                # 已加入，调用删除成员
+                # 已加入，直接踢出成员
                 return await self.delete_team_member(team_id, target["user_id"], db_session, email=email)
             else:
                 # 待加入，调用撤回邀请
                 return await self.revoke_team_invite(team_id, email, db_session)
 
         except Exception:
-            logger.exception("撤回邀请或删除成员时发生异常")
-            return {"success": False, "error": "撤回或删除成员失败，请稍后重试"}
+            logger.exception("撤回邀请或踢出成员时发生异常")
+            return {"success": False, "error": "撤回或踢出成员失败，请稍后重试"}
 
     async def delete_team(
         self,
@@ -3999,9 +4177,16 @@ class TeamService:
             expired_result = await db_session.execute(expired_stmt)
             expired = expired_result.scalar() or 0
 
-            # 高级席位（prolite / Premium）：已购总数与已占用数，按池汇总
-            prolite_total_stmt = select(func.coalesce(func.sum(Team.seats_prolite_total), 0))
-            prolite_assigned_stmt = select(func.coalesce(func.sum(Team.seats_prolite_assigned), 0))
+            # 高级席位（prolite / Premium）：已购总数与已占用数，按池汇总。
+            # 只统计可用账号（active/full）：异常账号（error/expired/banned）的席位
+            # 既分配不出去也进不了池子，计进来只会把总量撑得好看，与真实可分配容量不符。
+            usable_statuses = ("active", "full")
+            prolite_total_stmt = select(
+                func.coalesce(func.sum(Team.seats_prolite_total), 0)
+            ).where(Team.status.in_(usable_statuses))
+            prolite_assigned_stmt = select(
+                func.coalesce(func.sum(Team.seats_prolite_assigned), 0)
+            ).where(Team.status.in_(usable_statuses))
             if pool_type:
                 prolite_total_stmt = prolite_total_stmt.where(Team.pool_type == pool_type)
                 prolite_assigned_stmt = prolite_assigned_stmt.where(Team.pool_type == pool_type)

@@ -39,6 +39,20 @@ class ChatGPTService:
     # API 认的席型取值白名单
     SEAT_TYPE_VALUES = (SEAT_TYPE_DEFAULT, SEAT_TYPE_PROLITE)
 
+    # 单次批量邀请最多携带多少个邮箱。官方上传 CSV 也是一次提交整批，
+    # 但过大的请求体容易踩到未知上限，调用方按这个值分片。
+    MAX_INVITE_BATCH_SIZE = 50
+
+    # 邀请接口的单独超时。线上实测单次 POST /invites 服务端要 ~29s 才吐响应，
+    # 而会话默认 timeout=30 正好卡在边界上：每次都先 curl(28) 超时、退避、
+    # 再重发一次才成功，凭空多等 30s 并重复下发邀请。
+    INVITE_REQUEST_TIMEOUT = 120
+
+    # 撞上限流（429）后的退避秒数。官方对同一工作区的并发成员变更会回
+    # "Another subscription update is in progress. Please try again."，
+    # 意思是"等一下再来"——立刻放弃只会在下一轮调度里马上再撞一遍。
+    RATE_LIMIT_RETRY_DELAYS = [5, 15]
+
     @classmethod
     def normalize_seat_type(cls, seat_type: Optional[str]) -> Optional[str]:
         """把外部传入的席型归一化为 API 认的取值；非法值返回 None。"""
@@ -178,6 +192,24 @@ class ChatGPTService:
             self._sessions[identifier] = await self._create_session(db_session)
         return self._sessions[identifier]
 
+    @staticmethod
+    def _parse_retry_after(response: Any) -> Optional[float]:
+        """读取 Retry-After 头（秒）。非数字（HTTP 日期格式）或异常值时忽略。"""
+        try:
+            raw = (response.headers or {}).get("retry-after")
+        except Exception:
+            return None
+        if not raw:
+            return None
+        try:
+            seconds = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+        if seconds <= 0:
+            return None
+        # 官方偶尔给很大的值，别真睡那么久，封顶 60s
+        return min(seconds, 60.0)
+
     async def _make_request(
         self,
         method: str,
@@ -185,7 +217,8 @@ class ChatGPTService:
         headers: Dict[str, str],
         json_data: Optional[Dict[str, Any]] = None,
         db_session: Optional[DBAsyncSession] = None,
-        identifier: str = "default"
+        identifier: str = "default",
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         发送 HTTP 请求 (使用持久化隔离会话，提高 CF 通过率并防止污染)
@@ -227,12 +260,20 @@ class ChatGPTService:
 
                 logger.info(f"[{identifier}] 发送请求: {method} {url} (尝试 {attempt + 1})")
 
+                # curl_cffi 中 timeout=None 表示"不设超时"，所以只在显式传值时下发，
+                # 其余请求继续沿用会话上的默认超时。
+                timeout_kwargs = {} if timeout is None else {"timeout": timeout}
+
                 if method == "GET":
-                    response = await session.get(url, headers=headers)
+                    response = await session.get(url, headers=headers, **timeout_kwargs)
                 elif method == "POST":
-                    response = await session.post(url, headers=headers, json=json_data)
+                    response = await session.post(
+                        url, headers=headers, json=json_data, **timeout_kwargs
+                    )
                 elif method == "DELETE":
-                    response = await session.delete(url, headers=headers, json=json_data)
+                    response = await session.delete(
+                        url, headers=headers, json=json_data, **timeout_kwargs
+                    )
                 else:
                     raise ValueError(f"不支持的 HTTP 方法: {method}")
 
@@ -260,6 +301,32 @@ class ChatGPTService:
                     except Exception:
                         pass
                     
+                    # 限流不算"客户端错误"：官方对同一工作区的并发成员变更会回 429
+                    # ("Another subscription update is in progress")，含义是"等一下再来"。
+                    # 直接放弃的话，下一次调度会立刻再撞一遍，节奏反而更密；
+                    # 这里按 Retry-After（若给了）或固定退避等一轮再试，把节奏放慢。
+                    if status_code == 429:
+                        if attempt < self.MAX_RETRIES - 1:
+                            retry_after = self._parse_retry_after(response)
+                            delays = self.RATE_LIMIT_RETRY_DELAYS or [5]
+                            fallback = delays[min(attempt, len(delays) - 1)]
+                            delay = retry_after if retry_after else fallback
+                            logger.warning(
+                                "[%s] 触发限流 (429)，%.1fs 后重试: %s",
+                                identifier,
+                                delay,
+                                error_msg,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning("[%s] 触发限流 (429)，重试次数已用尽: %s", identifier, error_msg)
+                        return {
+                            "success": False,
+                            "status_code": 429,
+                            "error": error_msg,
+                            "error_code": "rate_limited",
+                        }
+
                     if error_code == "token_invalidated" or "token_invalidated" in str(error_msg).lower():
                         logger.warning(f"检测到 Token 失效，清理会话缓存: {identifier}")
                         await self.clear_session(identifier)
@@ -280,6 +347,76 @@ class ChatGPTService:
 
         return {"success": False, "status_code": 0, "error": "未知错误"}
 
+    async def send_invites_bulk(
+        self,
+        access_token: str,
+        account_id: str,
+        emails: List[str],
+        db_session: DBAsyncSession,
+        identifier: str = "default",
+        seat_type: str = SEAT_TYPE_DEFAULT,
+        submission_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """一次请求批量发送 Team 邀请。
+
+        ``/accounts/{id}/invites`` 的请求体字段 ``email_addresses`` 本身就是数组，
+        响应的 ``account_invites`` 也是列表——官方后台"上传 CSV 批量邀请"走的
+        就是这条路径。逐个邮箱各发一次请求会把整批邀请的耗时放大成 N 倍。
+
+        ``seat_type`` 是单值，一次请求内的邮箱必须同席型，调用方按席型分组后再进来。
+        ``submission_id`` 一次请求一个，保证整批重试幂等。
+        """
+        normalized_seat_type = self.normalize_seat_type(seat_type)
+        if normalized_seat_type is None:
+            return {
+                "success": False,
+                "status_code": 0,
+                "error": f"不支持的席位类型: {seat_type}",
+                "error_code": "invalid_seat_type",
+            }
+
+        normalized_emails = [str(item or "").strip() for item in (emails or [])]
+        normalized_emails = [item for item in normalized_emails if item]
+        if not normalized_emails:
+            return {
+                "success": False,
+                "status_code": 0,
+                "error": "没有需要邀请的邮箱",
+                "error_code": "empty_email_addresses",
+            }
+
+        url = f"{self.BASE_URL}/accounts/{account_id}/invites"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "chatgpt-account-id": account_id
+        }
+        json_data = {
+            "email_addresses": normalized_emails,
+            "flow_id": str(uuid.uuid4()),
+            "role": "standard-user",
+            "seat_type": normalized_seat_type,
+            "resend_emails": True,
+            "submission_id": submission_id or str(uuid.uuid4()),
+        }
+        logger.info(
+            "[%s] 批量邀请 %s 个邮箱 (seat_type=%s)",
+            identifier,
+            len(normalized_emails),
+            normalized_seat_type,
+        )
+        return await self._make_request(
+            "POST",
+            url,
+            headers,
+            json_data,
+            db_session,
+            identifier,
+            # 邀请是慢接口：线上实测单次 POST 要 ~29s 才返回，用单独放宽的超时，
+            # 避免卡在会话默认的 30s 上超时、退避、再重发一遍。
+            timeout=self.INVITE_REQUEST_TIMEOUT,
+        )
+
     async def send_invite(
         self,
         access_token: str,
@@ -299,30 +436,15 @@ class ChatGPTService:
         请求体中的 ``flow_id`` / ``submission_id`` 依据真实抓包补齐；``submission_id``
         可由调用方传入固定值，使重试具备幂等性。
         """
-        normalized_seat_type = self.normalize_seat_type(seat_type)
-        if normalized_seat_type is None:
-            return {
-                "success": False,
-                "status_code": 0,
-                "error": f"不支持的席位类型: {seat_type}",
-                "error_code": "invalid_seat_type",
-            }
-
-        url = f"{self.BASE_URL}/accounts/{account_id}/invites"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-            "chatgpt-account-id": account_id
-        }
-        json_data = {
-            "email_addresses": [email],
-            "flow_id": str(uuid.uuid4()),
-            "role": "standard-user",
-            "seat_type": normalized_seat_type,
-            "resend_emails": True,
-            "submission_id": submission_id or str(uuid.uuid4()),
-        }
-        return await self._make_request("POST", url, headers, json_data, db_session, identifier)
+        return await self.send_invites_bulk(
+            access_token,
+            account_id,
+            [email],
+            db_session,
+            identifier=identifier,
+            seat_type=seat_type,
+            submission_id=submission_id,
+        )
 
     async def get_members(
         self,
@@ -410,7 +532,7 @@ class ChatGPTService:
         db_session: DBAsyncSession,
         identifier: str = "default"
     ) -> Dict[str, Any]:
-        """删除成员"""
+        """踢出成员（把该用户从 Team 移除，席位随之释放）"""
         url = f"{self.BASE_URL}/accounts/{account_id}/users/{user_id}"
         headers = {
             "Authorization": f"Bearer {access_token}",

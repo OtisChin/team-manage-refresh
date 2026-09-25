@@ -135,8 +135,8 @@ function getFriendlyAdminErrorMessage(rawMessage, statusCode = 0, scene = 'commo
     }
 
     if (scene === 'member') {
-        if (includesAny('owner', '所有者') && includesAny('不可删除', 'cannot', 'forbidden')) {
-            return '所有者账号不支持删除';
+        if (includesAny('owner', '所有者') && includesAny('不可删除', '不可踢出', 'cannot', 'forbidden')) {
+            return '所有者账号不支持踢出';
         }
     }
 
@@ -1967,8 +1967,27 @@ async function viewMembers(teamId, teamEmail = '') {
     // 打开模态框
     showModal('manageMembersModal');
 
+    // 分批配置就地回填（拉不到就沿用输入框默认值，不打断邀请流程）
+    loadInviteBatchConfig();
+
     // 加载成员列表
     await loadModalMemberList(teamId);
+}
+
+// 邀请表单里的分批配置：值与系统设置页共用同一份，打开弹窗时同步一次
+async function loadInviteBatchConfig() {
+    const sizeInput = document.getElementById('inviteBatchSizeInline');
+    const intervalInput = document.getElementById('inviteBatchIntervalInline');
+    if (!sizeInput || !intervalInput) return;
+
+    const result = await apiCall('/admin/settings/invite-batch');
+    if (!result.success || !result.data) return;
+    if (Number.isFinite(Number(result.data.invite_batch_size))) {
+        sizeInput.value = result.data.invite_batch_size;
+    }
+    if (Number.isFinite(Number(result.data.invite_batch_interval_seconds))) {
+        intervalInput.value = result.data.invite_batch_interval_seconds;
+    }
 }
 
 function seatTypeBadge(seatType) {
@@ -1992,6 +2011,348 @@ function setTimedKickSwitchState(enabled) {
     if (warning) {
         warning.hidden = timedKickGloballyEnabled;
     }
+}
+
+// ===== 已加入成员：按到期时间筛选 =====
+// 「到期时间」就是这个子号配置的定时踢出时刻（kick_at），没配的显示「不限时」。
+// 筛选只改变可见行，不动已勾选集合：可以先筛一批勾上，再换条件继续勾，
+// 被筛掉的已勾选项不会丢，但会在筛选信息里提示出来，避免"看不见却已被选中"。
+let joinedMembersCache = [];
+let joinedMembersTeamId = null;
+// 待加入（邀请中）成员快照：批量撤回要按它把勾选集合收敛到"仅邀请中"的邮箱，
+// 否则共用勾选集合时会把已加入的成员也一起撤了
+let pendingMembersCache = [];
+const timedKickSelectedEmails = new Set();
+
+// 到期时间在列表里是"配置好的具体时刻"（精确到分），筛选就按这些具体时刻来比对，
+// 不划"今天 / 7 天内"这种宽泛区间——那会把本来各不相同的到期时间混成一批。
+function beijingMinuteOf(dateLike) {
+    const date = new Date(dateLike);
+    if (isNaN(date.getTime())) return '';
+    return toBeijingDateTime(date).slice(0, 16);
+}
+
+function matchExpiryFilter(member, filter) {
+    if (filter === 'all') return true;
+    if (filter === 'none') return !member.kick_at;
+    if (!member.kick_at) return false;
+    return beijingMinuteOf(member.kick_at) === filter;
+}
+
+// 选项 = 当前列表里真实出现过的到期时刻（升序、带人数）。
+// 这样"筛选"就是挑一个已经设置好的具体时间，而不是凭空划范围。
+function renderJoinedExpiryOptions() {
+    const select = document.getElementById('joinedExpiryFilter');
+    if (!select) return;
+
+    const counts = new Map();
+    let noKickCount = 0;
+    joinedMembersCache.forEach(m => {
+        if (!m.kick_at) {
+            noKickCount += 1;
+            return;
+        }
+        const key = beijingMinuteOf(m.kick_at);
+        if (!key) return;
+        counts.set(key, (counts.get(key) || 0) + 1);
+    });
+
+    const previous = select.value;
+    const options = ['<option value="all">全部</option>'];
+    Array.from(counts.keys()).sort().forEach(key => {
+        options.push(`<option value="${key}">${key}（${counts.get(key)} 人）</option>`);
+    });
+    if (noKickCount > 0) {
+        options.push(`<option value="none">不限时·未设置（${noKickCount} 人）</option>`);
+    }
+    select.innerHTML = options.join('');
+
+    // 重新加载后原选项可能已不存在（到期时间被改过），回退到"全部"
+    const stillThere = Array.from(select.options).some(o => o.value === previous);
+    select.value = stillThere ? previous : 'all';
+}
+
+function joinedMemberRow(member, teamId) {
+    return `
+        <tr>
+            <td>${timedKickCheckbox(member, teamId)}</td>
+            <td>${escapeHtml(member.email)}</td>
+            <td>
+                <span class="role-badge role-${member.role === 'account-owner' ? 'account-owner' : 'member'}">
+                    ${member.role === 'account-owner' ? '所有者' : '成员'}
+                </span>
+            </td>
+            <td>${seatTypeBadge(member.seat_type)}</td>
+            <td>${kickTimeCell(member)}</td>
+            <td>${formatDateTime(member.added_at)}</td>
+            <td style="text-align: right;">
+                ${member.role !== 'account-owner' ? `
+                    <button onclick='deleteMember(${JSON.stringify(teamId)}, ${JSON.stringify(member.user_id)}, ${JSON.stringify(member.email)}, true)' class="btn btn-sm btn-danger">
+                        <i data-lucide="user-minus"></i> 踢出
+                    </button>
+                ` : '<span class="text-muted">不可踢出</span>'}
+            </td>
+        </tr>
+    `;
+}
+
+function renderJoinedMembers() {
+    const tbody = document.getElementById('modalJoinedMembersTableBody');
+    if (!tbody) return;
+
+    const select = document.getElementById('joinedExpiryFilter');
+    const filter = select ? select.value : 'all';
+
+    const visible = joinedMembersCache.filter(m => matchExpiryFilter(m, filter));
+
+    if (visible.length === 0) {
+        const hint = joinedMembersCache.length === 0
+            ? '暂无已加入成员'
+            : '当前筛选条件下没有成员，换条件或选「全部」';
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">${hint}</td></tr>`;
+    } else {
+        tbody.innerHTML = visible.map(m => joinedMemberRow(m, joinedMembersTeamId)).join('');
+    }
+
+    const info = document.getElementById('joinedExpiryInfo');
+    if (info) {
+        if (filter === 'all') {
+            info.textContent = '';
+        } else {
+            const visibleEmails = new Set(visible.map(m => String(m.email || '').toLowerCase()));
+            const hiddenSelected = Array.from(timedKickSelectedEmails)
+                .filter(email => !visibleEmails.has(email)).length;
+            info.textContent = `筛出 ${visible.length} / ${joinedMembersCache.length} 人`
+                + (hiddenSelected > 0 ? `（另有 ${hiddenSelected} 个已勾选被隐藏）` : '');
+        }
+    }
+
+    updateTimedKickSelectedCount();
+    if (window.lucide) lucide.createIcons();
+}
+
+function applyJoinedExpiryFilter() {
+    renderJoinedMembers();
+}
+
+// ===== 按邮箱批量选中 + 一键踢出 =====
+// 成员一多，在长表里逐个找着勾太费劲：支持粘一批邮箱直接勾上，
+// 再对这批人立即踢出（已加入的移出 Team，邀请中的撤回邀请）。
+// ===== 批量操作进度条（批量邀请 / 批量踢人共用） =====
+let memberProgressHideTimer = null;
+
+// indeterminate=true 用于"一次请求、拿不到中途进度"的场景（批量邀请），
+// 此时显示滑动条并隐藏百分比，而不是编一个假的百分比骗人。
+function showMemberProgress(title, text, indeterminate) {
+    const panel = document.getElementById('memberBatchProgress');
+    if (!panel) return;
+    if (memberProgressHideTimer) {
+        window.clearTimeout(memberProgressHideTimer);
+        memberProgressHideTimer = null;
+    }
+    panel.className = 'member-progress show' + (indeterminate ? ' is-indeterminate' : '');
+    const titleNode = document.getElementById('memberProgressTitle');
+    const percentNode = document.getElementById('memberProgressPercent');
+    const barNode = document.getElementById('memberProgressBar');
+    const textNode = document.getElementById('memberProgressText');
+    if (titleNode) titleNode.textContent = title || '正在处理';
+    if (percentNode) percentNode.textContent = indeterminate ? '—' : '0%';
+    if (barNode) barNode.style.width = indeterminate ? '' : '0%';
+    if (textNode) textNode.textContent = text || '正在处理，请稍候…';
+}
+
+function updateMemberProgress(done, total, text) {
+    const panel = document.getElementById('memberBatchProgress');
+    if (!panel) return;
+    const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+    const percentNode = document.getElementById('memberProgressPercent');
+    const barNode = document.getElementById('memberProgressBar');
+    const textNode = document.getElementById('memberProgressText');
+    if (percentNode) percentNode.textContent = `${percent}%`;
+    if (barNode) barNode.style.width = `${percent}%`;
+    if (textNode && text) textNode.textContent = text;
+}
+
+function finishMemberProgress(text, isError) {
+    const panel = document.getElementById('memberBatchProgress');
+    if (!panel) return;
+    if (memberProgressHideTimer) {
+        window.clearTimeout(memberProgressHideTimer);
+        memberProgressHideTimer = null;
+    }
+    panel.className = 'member-progress show ' + (isError ? 'is-failed' : 'is-done');
+    const percentNode = document.getElementById('memberProgressPercent');
+    const barNode = document.getElementById('memberProgressBar');
+    const textNode = document.getElementById('memberProgressText');
+    if (percentNode) percentNode.textContent = '100%';
+    if (barNode) barNode.style.width = '100%';
+    if (textNode) textNode.textContent = text || '完成';
+    // 结果不自动收起：成功几个、失败几个是要照着核对的信息。
+    // 收起由右上角 × 控制，或下一次操作开始时自动替换。
+}
+
+function hideMemberProgress() {
+    const panel = document.getElementById('memberBatchProgress');
+    if (panel) panel.className = 'member-progress';
+    if (memberProgressHideTimer) {
+        window.clearTimeout(memberProgressHideTimer);
+        memberProgressHideTimer = null;
+    }
+}
+
+function parseEmailTokens(text) {
+    return String(text || '')
+        .split(/[\s,;，；、]+/)
+        .map(item => item.trim().toLowerCase())
+        .filter(Boolean);
+}
+
+function setBulkSelectHint(message, isWarning) {
+    const hint = document.getElementById('bulkSelectHint');
+    if (!hint) return;
+    hint.className = isWarning ? 'bulk-select-hint is-warn' : 'bulk-select-hint';
+    hint.textContent = message || '';
+}
+
+function selectMembersByEmails() {
+    const input = document.getElementById('bulkSelectEmails');
+    const emails = parseEmailTokens(input ? input.value : '');
+    if (!emails.length) {
+        setBulkSelectHint('先粘贴要选中的邮箱。', true);
+        return;
+    }
+
+    const known = new Map();
+    joinedMembersCache.forEach(member => {
+        const email = String(member.email || '').toLowerCase();
+        if (email) known.set(email, member);
+    });
+
+    const missing = [];
+    emails.forEach(email => {
+        const member = known.get(email);
+        // 车主不可配置；不在列表里的邮箱也报出来，避免"粘了 20 个只勾上 3 个"的静默漏选
+        if (!member || member.role === 'account-owner') {
+            missing.push(email);
+            return;
+        }
+        timedKickSelectedEmails.add(email);
+    });
+
+    applyJoinedExpiryFilter();
+
+    const selected = emails.length - missing.length;
+    if (!missing.length) {
+        setBulkSelectHint(`已选中 ${selected} 个成员。`, false);
+        return;
+    }
+    const shown = missing.slice(0, 5).join('、');
+    const more = missing.length > 5 ? ` 等 ${missing.length} 个` : '';
+    setBulkSelectHint(
+        `已选中 ${selected} 个；${missing.length} 个不在当前列表（或为车主）：${shown}${more}`,
+        true
+    );
+}
+
+function clearTimedKickSelection() {
+    timedKickSelectedEmails.clear();
+    document.querySelectorAll('.timed-kick-checkbox').forEach(box => { box.checked = false; });
+    const allJoined = document.getElementById('timedKickSelectAllJoined');
+    const allInvited = document.getElementById('timedKickSelectAllInvited');
+    if (allJoined) allJoined.checked = false;
+    if (allInvited) allInvited.checked = false;
+    updateTimedKickSelectedCount();
+    setBulkSelectHint('已清空选择。', false);
+}
+
+async function bulkKickSelected() {
+    const teamId = window.currentTeamId;
+    const emails = Array.from(timedKickSelectedEmails);
+    if (!teamId) {
+        showToast('无法获取 Team ID', 'error');
+        return;
+    }
+    if (!emails.length) {
+        showToast('请先勾选要踢出的成员', 'error');
+        return;
+    }
+    if (!confirm(`确定要踢出选中的 ${emails.length} 个成员吗？\n\n已加入的会立即移出 Team，邀请中的会撤回邀请。此操作不可恢复。`)) {
+        return;
+    }
+
+    const joinedByEmail = new Map();
+    joinedMembersCache.forEach(member => {
+        const email = String(member.email || '').toLowerCase();
+        if (email) joinedByEmail.set(email, member);
+    });
+
+    const btn = document.getElementById('bulkKickBtn');
+    const originalHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '处理中...';
+    }
+    setBulkSelectHint('', false);
+    showMemberProgress('正在踢出选中成员', `共 ${emails.length} 个，逐个处理中…`, false);
+
+    let kicked = 0;
+    let revoked = 0;
+    const failures = [];
+
+    // 串行发送：官方对同一工作区的成员变更是排他的，并发只会互相撞 429
+    for (let i = 0; i < emails.length; i += 1) {
+        const email = emails[i];
+        updateMemberProgress(i, emails.length, `正在处理 ${i + 1}/${emails.length}：${email}`);
+        const member = joinedByEmail.get(email);
+        try {
+            const result = member && member.user_id
+                ? await apiCall(`/admin/teams/${teamId}/members/${member.user_id}/delete`, {
+                    method: 'POST',
+                    body: JSON.stringify({ email })
+                })
+                : await apiCall(`/admin/teams/${teamId}/invites/revoke`, {
+                    method: 'POST',
+                    body: JSON.stringify({ email })
+                });
+            if (result.success) {
+                if (member && member.user_id) kicked += 1;
+                else revoked += 1;
+            } else {
+                failures.push(`${email}: ${result.error || '处理失败'}`);
+            }
+        } catch (error) {
+            failures.push(`${email}: ${error.message || '网络错误'}`);
+        }
+        updateMemberProgress(i + 1, emails.length, `已完成 ${i + 1}/${emails.length}`);
+    }
+
+    if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+    }
+
+    timedKickSelectedEmails.clear();
+    await loadModalMemberList(teamId);
+
+    const parts = [];
+    if (kicked) parts.push(`踢出 ${kicked} 个`);
+    if (revoked) parts.push(`撤回邀请 ${revoked} 个`);
+    if (failures.length) parts.push(`失败 ${failures.length} 个`);
+    const summary = parts.length ? parts.join('，') : '没有需要处理的成员';
+
+    finishMemberProgress(`完成：${summary}`, failures.length > 0);
+
+    if (failures.length) {
+        showToast(`批量踢出完成：${summary}`, 'error');
+        setBulkSelectHint(
+            `失败明细：${failures.slice(0, 3).join('；')}${failures.length > 3 ? ` 等 ${failures.length} 个` : ''}`,
+            true
+        );
+    } else {
+        showToast(`批量踢出完成：${summary}`, 'success');
+        setBulkSelectHint('', false);
+    }
+    if (window.lucide) lucide.createIcons();
 }
 
 function kickTimeCell(member) {
@@ -2019,14 +2380,25 @@ function timedKickCheckbox(member, teamId) {
     if (member.role === 'account-owner') {
         return '<span class="text-muted" title="车主不可配置">-</span>';
     }
+    // 勾选状态记在 Set 里，重渲染（换筛选条件）后仍能恢复，不会把已勾的号弄丢
+    const checked = timedKickSelectedEmails.has(String(member.email || '').toLowerCase())
+        ? ' checked' : '';
     return `<input type="checkbox" class="timed-kick-checkbox" data-status="${member.status}"
-        value="${escapeHtml(member.email)}"
-        onchange="updateTimedKickSelectedCount()">`;
+        value="${escapeHtml(member.email)}"${checked}
+        onchange="onTimedKickCheckboxChange(this)">`;
+}
+
+function onTimedKickCheckboxChange(box) {
+    const email = String(box.value || '').toLowerCase();
+    if (!email) return;
+    if (box.checked) timedKickSelectedEmails.add(email);
+    else timedKickSelectedEmails.delete(email);
+    updateTimedKickSelectedCount();
 }
 
 function collectTimedKickSelection() {
-    return Array.from(document.querySelectorAll('.timed-kick-checkbox:checked'))
-        .map(box => box.value);
+    // 以集合为准，而不是扫 DOM：被筛选隐藏的已勾选项同样要被提交
+    return Array.from(timedKickSelectedEmails);
 }
 
 function updateTimedKickSelectedCount() {
@@ -2038,12 +2410,99 @@ function updateTimedKickSelectedCount() {
         if (row) row.classList.toggle('member-row-selected', box.checked);
     });
 
-    const checked = boxes.filter(box => box.checked).length;
+    const checked = timedKickSelectedEmails.size;
     const counter = document.getElementById('timedKickSelectedCount');
     if (counter) counter.textContent = String(checked);
 
     const badge = document.getElementById('timedKickCountBadge');
     if (badge) badge.classList.toggle('is-active', checked > 0);
+
+    // 待加入区只认自己那份交集：共用勾选集合时，勾了已加入的成员不应让撤回按钮亮起来
+    const pendingCount = selectedPendingInviteEmails().length;
+    const pendingCounter = document.getElementById('inviteRevokeSelectedCount');
+    if (pendingCounter) pendingCounter.textContent = String(pendingCount);
+    const pendingBadge = document.getElementById('inviteRevokeCountBadge');
+    if (pendingBadge) pendingBadge.classList.toggle('is-active', pendingCount > 0);
+    const revokeBtn = document.getElementById('bulkRevokeBtn');
+    if (revokeBtn) revokeBtn.disabled = pendingCount === 0;
+}
+
+// 勾选集合 ∩ 待加入列表。撤回只允许落在这个交集里，避免误撤已加入的成员
+function selectedPendingInviteEmails() {
+    if (!timedKickSelectedEmails.size || !pendingMembersCache.length) return [];
+    const pendingEmails = new Set(
+        pendingMembersCache.map(m => String(m.email || '').toLowerCase()).filter(Boolean)
+    );
+    return Array.from(timedKickSelectedEmails).filter(email => pendingEmails.has(email));
+}
+
+async function bulkRevokeSelectedInvites() {
+    const teamId = window.currentTeamId;
+    if (!teamId) {
+        showToast('无法获取 Team ID', 'error');
+        return;
+    }
+
+    const emails = selectedPendingInviteEmails();
+    if (!emails.length) {
+        showToast('请先勾选要撤回的待加入成员', 'error');
+        return;
+    }
+    if (!confirm(`确定要撤回选中的 ${emails.length} 个邀请吗？\n\n对方将无法通过邀请链接加入，需要重新邀请。`)) {
+        return;
+    }
+
+    const btn = document.getElementById('bulkRevokeBtn');
+    const originalHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '处理中...';
+    }
+    showMemberProgress('正在撤回选中的邀请', `共 ${emails.length} 个，逐个处理中…`, false);
+
+    let revoked = 0;
+    const failures = [];
+
+    // 串行发送：官方对同一工作区的成员变更是排他的，并发只会互相撞 429
+    for (let i = 0; i < emails.length; i += 1) {
+        const email = emails[i];
+        updateMemberProgress(i, emails.length, `正在撤回 ${i + 1}/${emails.length}：${email}`);
+        try {
+            const result = await apiCall(`/admin/teams/${teamId}/invites/revoke`, {
+                method: 'POST',
+                body: JSON.stringify({ email })
+            });
+            if (result.success) revoked += 1;
+            else failures.push(`${email}: ${getFriendlyAdminErrorMessage(result.error || '撤回失败', 0, 'member')}`);
+        } catch (error) {
+            failures.push(`${email}: ${error.message || '网络错误'}`);
+        }
+        updateMemberProgress(i + 1, emails.length, `已完成 ${i + 1}/${emails.length}`);
+    }
+
+    if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+    }
+
+    // 撤回成功后这些人已不在待加入列表里，勾选集合里的残留必须清掉，
+    // 否则重新加载列表时会被当成"已勾选但看不见"的幽灵项
+    emails.forEach(email => timedKickSelectedEmails.delete(email));
+    await loadModalMemberList(teamId);
+
+    const summary = failures.length
+        ? `撤回 ${revoked} 个，失败 ${failures.length} 个`
+        : `撤回 ${revoked} 个`;
+    finishMemberProgress(`完成：${summary}`, failures.length > 0);
+    showToast(`批量撤回完成：${summary}`, failures.length ? 'error' : 'success');
+
+    if (failures.length) {
+        setBulkSelectHint(
+            `撤回失败明细：${failures.slice(0, 3).join('；')}${failures.length > 3 ? ` 等 ${failures.length} 个` : ''}`,
+            true
+        );
+    }
+    if (window.lucide) lucide.createIcons();
 }
 
 // 选完时间给一行预览，并即时拦掉已过去的时刻
@@ -2076,8 +2535,15 @@ function updateTimedKickPreview() {
 }
 
 function toggleTimedKickAll(status, checked) {
+    // 作用范围就是当前可见行（筛选后的行），勾选集合同步更新
     document.querySelectorAll(`.timed-kick-checkbox[data-status="${status}"]`)
-        .forEach(box => { box.checked = checked; });
+        .forEach(box => {
+            box.checked = checked;
+            const email = String(box.value || '').toLowerCase();
+            if (!email) return;
+            if (checked) timedKickSelectedEmails.add(email);
+            else timedKickSelectedEmails.delete(email);
+        });
     updateTimedKickSelectedCount();
 }
 
@@ -2363,6 +2829,7 @@ document.addEventListener('scroll', positionKickCalendar, true);
 
 function resetTimedKickControls() {
     document.querySelectorAll('.timed-kick-checkbox').forEach(box => { box.checked = false; });
+    timedKickSelectedEmails.clear();
     const allJoined = document.getElementById('timedKickSelectAllJoined');
     const allInvited = document.getElementById('timedKickSelectAllInvited');
     if (allJoined) allJoined.checked = false;
@@ -2435,6 +2902,12 @@ async function loadModalMemberList(teamId) {
     const joinedTableBody = document.getElementById('modalJoinedMembersTableBody');
     const invitedTableBody = document.getElementById('modalInvitedMembersTableBody');
 
+    // 加载期间先作废上一份待加入快照：撤回按钮在这种中间态必须点不动，
+    // 否则会拿着旧列表去撤已经不存在的邮箱
+    pendingMembersCache = [];
+    const revokeBtnLoading = document.getElementById('bulkRevokeBtn');
+    if (revokeBtnLoading) revokeBtnLoading.disabled = true;
+
     if (joinedTableBody) joinedTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 2rem;">加载中...</td></tr>';
     if (invitedTableBody) invitedTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 2rem;">加载中...</td></tr>';
 
@@ -2446,34 +2919,16 @@ async function loadModalMemberList(teamId) {
             const joinedMembers = allMembers.filter(m => m.status === 'joined');
             const invitedMembers = allMembers.filter(m => m.status === 'invited');
 
-            // 渲染已加入成员
-            if (joinedTableBody) {
-                if (joinedMembers.length === 0) {
-                    joinedTableBody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">暂无已加入成员</td></tr>';
-                } else {
-                    joinedTableBody.innerHTML = joinedMembers.map(m => `
-                        <tr>
-                            <td>${timedKickCheckbox(m, teamId)}</td>
-                            <td>${escapeHtml(m.email)}</td>
-                            <td>
-                                <span class="role-badge role-${m.role === 'account-owner' ? 'account-owner' : 'member'}">
-                                    ${m.role === 'account-owner' ? '所有者' : '成员'}
-                                </span>
-                            </td>
-                            <td>${seatTypeBadge(m.seat_type)}</td>
-                            <td>${kickTimeCell(m)}</td>
-                            <td>${formatDateTime(m.added_at)}</td>
-                            <td style="text-align: right;">
-                                ${m.role !== 'account-owner' ? `
-                                    <button onclick='deleteMember(${JSON.stringify(teamId)}, ${JSON.stringify(m.user_id)}, ${JSON.stringify(m.email)}, true)' class="btn btn-sm btn-danger">
-                                        <i data-lucide="trash-2"></i> 删除
-                                    </button>
-                                ` : '<span class="text-muted">不可删除</span>'}
-                            </td>
-                        </tr>
-                    `).join('');
-                }
-            }
+            // 已加入成员走「缓存 + 按到期时间筛选」渲染：换筛选条件只是重渲染，
+            // 不必再打一次接口，勾选状态也由 timedKickSelectedEmails 跨渲染保留。
+            joinedMembersCache = joinedMembers;
+            joinedMembersTeamId = teamId;
+            // 待加入快照供「一键撤回选中」做交集判断，必须早于 resetTimedKickControls，
+            // 因为后者会顺带刷新撤回按钮的可用状态
+            pendingMembersCache = invitedMembers;
+            // 选项来自这份列表里真实设置过的具体到期时刻，所以先建选项再渲染
+            renderJoinedExpiryOptions();
+            applyJoinedExpiryFilter();
 
             // 渲染待加入成员
             if (invitedTableBody) {
@@ -2569,18 +3024,52 @@ async function handleAddMember(event) {
         return;
     }
 
+    // 就地可调的分批参数：随请求一起提交，服务端会把它落库，下次打开弹窗沿用
+    const batchSizeField = document.getElementById('inviteBatchSizeInline');
+    const batchIntervalField = document.getElementById('inviteBatchIntervalInline');
+    const invite_batch_size = batchSizeField ? parseInt(batchSizeField.value, 10) : null;
+    const invite_batch_interval_seconds = batchIntervalField ? parseFloat(batchIntervalField.value) : null;
+
+    // 校验放在禁用按钮之前：否则报错时按钮留在禁用态
+    if (batchSizeField && (isNaN(invite_batch_size) || invite_batch_size < 1 || invite_batch_size > 50)) {
+        showToast('每批数量必须在 1~50 之间', 'error');
+        return;
+    }
+    if (batchIntervalField && (isNaN(invite_batch_interval_seconds) || invite_batch_interval_seconds < 0 || invite_batch_interval_seconds > 600)) {
+        showToast('批间等待必须在 0~600 秒之间', 'error');
+        return;
+    }
+
     submitButton.disabled = true;
     const originalText = submitButton.innerHTML;
     submitButton.textContent = '发送中...';
 
+    // 邮箱超过一批时会分批发、批间等待。先把批数和预计等待时间算出来告诉用户，
+    // 免得看到进度条长时间不动以为卡住了；中途进度前端拿不到，用不确定态进度条如实表达。
+    const batchCount = invite_batch_size ? Math.ceil(emails.length / invite_batch_size) : 1;
+    const waitSeconds = batchCount > 1
+        ? Math.round((batchCount - 1) * (invite_batch_interval_seconds || 0))
+        : 0;
+    const batchHint = batchCount > 1
+        ? `共 ${emails.length} 个邮箱，分 ${batchCount} 批发，批间等待约 ${waitSeconds} 秒，请勿关闭窗口。`
+        : `共 ${emails.length} 个邮箱，一次发出，请勿关闭窗口。`;
+    showMemberProgress('正在发送邀请', batchHint, true);
+
     try {
         const result = await apiCall(`/admin/teams/${teamId}/members/add`, {
             method: 'POST',
-            body: JSON.stringify({ emails, seat_type: seatType })
+            body: JSON.stringify({
+                emails,
+                seat_type: seatType,
+                invite_batch_size,
+                invite_batch_interval_seconds
+            })
         });
 
         if (!result.success) {
-            showToast(getFriendlyAdminErrorMessage(result.error || '添加失败', 0, 'member'), 'error');
+            const failure = getFriendlyAdminErrorMessage(result.error || '添加失败', 0, 'member');
+            finishMemberProgress(`邀请失败：${failure}`, true);
+            showToast(failure, 'error');
             return;
         }
 
@@ -2589,6 +3078,22 @@ async function handleAddMember(event) {
         const invitedCount = Number(summary.invited || 0);
         const failedCount = Number(summary.failed || 0) + Number(summary.invalid || 0) + Number(summary.duplicate || 0) + Number(summary.already_exists || 0) + Number(summary.no_seat || 0) + Number(summary.not_processed || 0);
         const message = data.message || `成功 ${invitedCount} 个，失败 ${failedCount} 个`;
+
+        // 每一类单独报数：只给"成功 N 失败 M"时，管理员分不清
+        // "已在 Team 内"和"席位不足"算哪边、下次到底该不该重试。
+        const detailParts = [`成功邀请 ${invitedCount} 个`];
+        [
+            ['already_exists', '已在 Team 内'],
+            ['duplicate', '重复提交'],
+            ['invalid', '邮箱格式无效'],
+            ['no_seat', '席位不足'],
+            ['failed', '官方拒绝'],
+            ['not_processed', '未处理'],
+        ].forEach(([key, label]) => {
+            const value = Number(summary[key] || 0);
+            if (value > 0) detailParts.push(`${label} ${value} 个`);
+        });
+        finishMemberProgress(`邀请完成：${detailParts.join('，')}`, invitedCount === 0);
 
         if (invitedCount > 0 && failedCount > 0) {
             showToast(message, 'warning');
@@ -2600,15 +3105,14 @@ async function handleAddMember(event) {
         }
 
         if (invitedCount > 0 && document.getElementById('manageMembersModal').classList.contains('show')) {
+            // 只刷新弹窗内的成员列表。整页 reload 会把刚出来的邀请结果一起冲掉，
+            // 而"这次成功邀请了几个"正是管理员要照着核对的信息。
             await loadModalMemberList(teamId);
-            if (failedCount === 0) {
-                setTimeout(() => {
-                    window.location.reload();
-                }, 800);
-            }
         }
     } catch (error) {
-        showToast(getFriendlyAdminErrorMessage(error.message || '网络错误', 0, 'member'), 'error');
+        const failure = getFriendlyAdminErrorMessage(error.message || '网络错误', 0, 'member');
+        finishMemberProgress(`邀请失败：${failure}`, true);
+        showToast(failure, 'error');
     } finally {
         submitButton.disabled = false;
         submitButton.innerHTML = originalText;
@@ -2616,26 +3120,26 @@ async function handleAddMember(event) {
 }
 
 async function deleteMember(teamId, userId, email, inModal = false) {
-    if (!confirm(`确定要删除成员 "${email}" 吗?\n\n此操作不可恢复!`)) {
+    if (!confirm(`确定要踢出成员 "${email}" 吗?\n\n此操作不可恢复!`)) {
         return;
     }
 
     try {
-        showToast('正在删除...', 'info');
+        showToast('正在踢出...', 'info');
         const result = await apiCall(`/admin/teams/${teamId}/members/${userId}/delete`, {
             method: 'POST',
             body: JSON.stringify({ email })
         });
 
         if (result.success) {
-            showToast('删除成功', 'success');
+            showToast('已踢出', 'success');
             if (inModal) {
                 await loadModalMemberList(teamId);
             } else {
                 setTimeout(() => location.reload(), 1000);
             }
         } else {
-            showToast(getFriendlyAdminErrorMessage(result.error || '删除失败', 0, 'member'), 'error');
+            showToast(getFriendlyAdminErrorMessage(result.error || '踢出失败', 0, 'member'), 'error');
         }
     } catch (error) {
         showToast(getFriendlyAdminErrorMessage(error.message || '网络错误', 0, 'member'), 'error');

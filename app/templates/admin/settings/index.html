@@ -33,6 +33,7 @@
             <a href="#settings-warranty-auto-kick" class="settings-nav-pill settings-nav-link" data-target="settings-warranty-auto-kick">兑换码自动踢人</a>
             <a href="#settings-timed-kick" class="settings-nav-pill settings-nav-link" data-target="settings-timed-kick">定时踢人</a>
             <a href="#settings-kick-interval" class="settings-nav-pill settings-nav-link" data-target="settings-kick-interval">批量踢出间隔</a>
+            <a href="#settings-invite-batch" class="settings-nav-pill settings-nav-link" data-target="settings-invite-batch">批量邀请分批</a>
         </div>
         <div class="settings-nav-group">
             <div class="settings-nav-group-title">业务规则</div>
@@ -324,7 +325,7 @@
             <label>两次踢出之间的随机等待 (秒)</label>
             <div style="display: flex; gap: 0.75rem; align-items: center;">
                 <input type="number" id="kickIntervalMinSeconds" name="kick_interval_min_seconds"
-                    value="{{ kick_interval_min_seconds or '10' }}" min="0" max="600" step="1"
+                    value="{{ kick_interval_min_seconds or '15' }}" min="0" max="600" step="1"
                     class="form-control" style="width: 140px;">
                 <span class="text-muted">~</span>
                 <input type="number" id="kickIntervalMaxSeconds" name="kick_interval_max_seconds"
@@ -333,7 +334,7 @@
             </div>
             <p class="form-help">
                 批量踢人时，每处理完一个账号后随机等待这个区间内的秒数再处理下一个，用于分散请求节奏、降低被风控的概率。
-                默认 10~20 秒。<strong>两个都填 0 表示不等待</strong>（一次性踢完，适合账号很少的场景）。
+                默认 15~20 秒。<strong>两个都填 0 表示不等待</strong>（一次性踢完，适合账号很少的场景）。
                 等待只发生在<strong>同一个 Team 内的连续踢出</strong>之间：换 Team、或被跳过的账号都不占用等待，
                 避免一批账号排队把后面的到期子号越推越晚。
                 对「过期兑换码」「非授权成员」「后台邀请过期」「定时踢人」四种批量踢出都生效。
@@ -341,6 +342,38 @@
         </div>
 
         <button type="submit" class="btn btn-primary">保存批量踢出间隔</button>
+    </form>
+</div>
+
+
+<!-- 批量邀请分批：一次给上百个邮箱时按批次分开发，批间等待，
+     避免连续请求撞上官方限流 -->
+<div class="content-section settings-panel" id="settings-invite-batch">
+    <div class="section-header">
+        <h3>批量邀请分批</h3>
+    </div>
+
+    <form id="inviteBatchForm" class="settings-form">
+        <div class="form-group">
+            <label>每批邀请的邮箱数 / 批间等待 (秒)</label>
+            <div style="display: flex; gap: 0.75rem; align-items: center;">
+                <input type="number" id="inviteBatchSize" name="invite_batch_size"
+                    value="{{ invite_batch_size or '25' }}" min="1" max="50" step="1"
+                    class="form-control" style="width: 140px;">
+                <span class="text-muted">个 /</span>
+                <input type="number" id="inviteBatchIntervalSeconds" name="invite_batch_interval_seconds"
+                    value="{{ invite_batch_interval_seconds or '30' }}" min="0" max="600" step="1"
+                    class="form-control" style="width: 140px;">
+                <span class="text-muted">秒</span>
+            </div>
+            <p class="form-help">
+                输入超过一批的邮箱时（例如 100 个），会按这里的批次大小拆开发送：第 1 批发完等指定秒数，再发第 2 批，依次类推。
+                默认<strong>每批 25 个、间隔 30 秒</strong>。批间等待填 0 表示不等待（一口气发完）。
+                批次大小上限 50，这是官方单次邀请请求能带的邮箱数上限，填更大也会被压回 50。
+            </p>
+        </div>
+
+        <button type="submit" class="btn btn-primary">保存批量邀请分批</button>
     </form>
 </div>
 
@@ -852,6 +885,44 @@
 
             if (response.ok && data.success) {
                 showToast(data.message || '批量踢出间隔已保存', 'success');
+            } else {
+                showToast(data.error || '保存失败', 'error');
+            }
+        } catch (error) {
+            showToast('网络错误', 'error');
+        }
+    });
+
+    // 批量邀请分批（每批邮箱数 + 批间等待）
+    document.getElementById('inviteBatchForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+
+        const invite_batch_size = parseInt(document.getElementById('inviteBatchSize').value);
+        const invite_batch_interval_seconds = parseFloat(document.getElementById('inviteBatchIntervalSeconds').value);
+
+        if (isNaN(invite_batch_size) || invite_batch_size < 1 || invite_batch_size > 50) {
+            showToast('每批邮箱数必须在 1~50 之间', 'error');
+            return;
+        }
+
+        if (isNaN(invite_batch_interval_seconds) || invite_batch_interval_seconds < 0 || invite_batch_interval_seconds > 600) {
+            showToast('批间等待必须在 0~600 秒之间', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('/admin/settings/invite-batch', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ invite_batch_size, invite_batch_interval_seconds })
+            });
+
+            const data = await response.json();
+
+            if (response.ok && data.success) {
+                showToast(data.message || '批量邀请分批配置已保存', 'success');
             } else {
                 showToast(data.error || '保存失败', 'error');
             }

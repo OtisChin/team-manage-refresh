@@ -14,7 +14,13 @@ from app.services.redeem_flow import RedeemFlowService
 from app.services.notification import notification_service
 from app.services.redemption import RedemptionService
 from app.services.settings import settings_service
-from app.services.team import TeamService
+from app.services.chatgpt import ChatGPTService
+from app.services.team import (
+    TeamService,
+    DEFAULT_INVITE_BATCH_SIZE,
+    DEFAULT_INVITE_BATCH_INTERVAL_SECONDS,
+    MAX_INVITE_BATCH_INTERVAL_SECONDS,
+)
 from app.services.warranty import WarrantyService
 from app.routes.admin import generate_welfare_common_code, WelfareCodeGenerateRequest
 from app.utils.time_utils import get_now
@@ -1730,6 +1736,28 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
     async def _noop_reset(*args, **kwargs):
         return None
 
+    @staticmethod
+    def _stub_batch_sender(calls=None, success=True):
+        """批量邀请桩：记录每批带的邮箱，并返回与真实响应同形状的结果。"""
+        async def stub_send_batch(team_id, emails, seat_type, db_session):
+            if calls is not None:
+                calls.append(list(emails))
+            if not success:
+                return {
+                    "success": False,
+                    "status_code": 400,
+                    "error": "批量邀请失败",
+                    "error_code": "invite_failed",
+                }
+            return {
+                "success": True,
+                "status_code": 200,
+                "data": {"account_invites": [{"email_address": e} for e in emails]},
+                "error": None,
+            }
+
+        return stub_send_batch
+
     async def test_add_team_members_reuses_one_sync_for_all_emails(self):
         """批量邀请只应在开头同步一次，并把成员快照透传给每个邮箱。
 
@@ -1740,6 +1768,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
         team_service = TeamService()
         sync_calls = []
         snapshots = []
+        batch_calls = []
 
         async def stub_sync(team_id, db_session, force_refresh=False):
             sync_calls.append(team_id)
@@ -1751,7 +1780,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
             }
 
         async def stub_add_member(team_id, email, db_session, seat_type="default",
-                                  member_emails_snapshot=None):
+                                  member_emails_snapshot=None, **kwargs):
             snapshots.append(member_emails_snapshot)
             return {
                 "success": True,
@@ -1763,6 +1792,8 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.session_factory() as session:
             with patch.object(team_service, "sync_team_info", new=stub_sync), \
+                 patch.object(team_service, "_send_invite_batch",
+                              new=self._stub_batch_sender(calls=batch_calls)), \
                  patch.object(team_service, "add_team_member", new=stub_add_member):
                 result = await team_service.add_team_members(
                     101,
@@ -1774,10 +1805,164 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["summary"]["invited"], 3)
         # 三个邮箱只触发一次同步，而不是每个邮箱各同步一次
         self.assertEqual(sync_calls, [101])
+        # 三个邮箱必须合并成一次批量邀请请求，而不是逐个发送
+        self.assertEqual(len(batch_calls), 1)
+        self.assertEqual(
+            batch_calls[0], ["a@example.com", "b@example.com", "c@example.com"]
+        )
         # 快照必须透传，否则 add_team_member 会退回内部同步
         self.assertEqual(len(snapshots), 3)
         for snapshot in snapshots:
             self.assertIn("existing@example.com", snapshot)
+
+    @staticmethod
+    def _batch_settings(size: str, interval: str):
+        """返回一个只认批量邀请配置的 get_setting 桩。"""
+        async def stub_get_setting(db_session, key, default=None):
+            return {
+                "invite_batch_size": size,
+                "invite_batch_interval_seconds": interval,
+            }.get(key, default)
+
+        return stub_get_setting
+
+    @staticmethod
+    async def _noop_verify(team_id, emails):
+        return None
+
+    async def test_add_team_members_splits_into_configured_batches_with_wait(self):
+        """输入量超过一批时按配置拆分，且只在批与批之间等待。
+
+        线上场景：一次贴 100 个邮箱，一口气全发出去容易撞限流，所以按批次大小
+        分批发；第一批立即发，之后每批之前等指定秒数。
+        """
+        await self._seed_team(current_members=1, max_members=10)
+        team_service = TeamService()
+        batch_calls = []
+        sleeps = []
+
+        async def stub_sync(team_id, db_session, force_refresh=False):
+            return {
+                "success": True,
+                "message": "同步成功",
+                "member_emails": [],
+                "error": None,
+            }
+
+        async def stub_add_member(team_id, email, db_session, seat_type="default",
+                                  member_emails_snapshot=None, **kwargs):
+            return {
+                "success": True,
+                "message": f"邀请已发送到 {email}",
+                "error": None,
+                "status": "invited",
+                "email": email,
+            }
+
+        async def stub_sleep(seconds):
+            sleeps.append(seconds)
+
+        emails = [f"u{i}@example.com" for i in range(5)]
+
+        async with self.session_factory() as session:
+            with patch.object(team_service, "sync_team_info", new=stub_sync), \
+                 patch.object(team_service, "_send_invite_batch",
+                              new=self._stub_batch_sender(calls=batch_calls)), \
+                 patch.object(team_service, "add_team_member", new=stub_add_member), \
+                 patch.object(team_service, "_background_verify_admin_invites",
+                              new=self._noop_verify), \
+                 patch("app.services.team.settings_service.get_setting",
+                       new=self._batch_settings("2", "30")), \
+                 patch("app.services.team.asyncio.sleep", new=stub_sleep):
+                result = await team_service.add_team_members(101, emails, session)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["summary"]["invited"], 5)
+        # 5 个邮箱按每批 2 个拆成 2/2/1 三批
+        self.assertEqual(batch_calls, [emails[0:2], emails[2:4], emails[4:5]])
+        # 第一批不等待；只有第 2、3 批之前各等 30 秒
+        self.assertEqual(sleeps, [30.0, 30.0])
+
+    async def test_add_team_members_single_batch_does_not_wait(self):
+        """一批能装下时不应有任何等待。"""
+        await self._seed_team(current_members=1, max_members=10)
+        team_service = TeamService()
+        batch_calls = []
+        sleeps = []
+
+        async def stub_sync(team_id, db_session, force_refresh=False):
+            return {
+                "success": True,
+                "message": "同步成功",
+                "member_emails": [],
+                "error": None,
+            }
+
+        async def stub_add_member(team_id, email, db_session, seat_type="default",
+                                  member_emails_snapshot=None, **kwargs):
+            return {
+                "success": True,
+                "message": f"邀请已发送到 {email}",
+                "error": None,
+                "status": "invited",
+                "email": email,
+            }
+
+        async def stub_sleep(seconds):
+            sleeps.append(seconds)
+
+        emails = [f"s{i}@example.com" for i in range(3)]
+
+        async with self.session_factory() as session:
+            with patch.object(team_service, "sync_team_info", new=stub_sync), \
+                 patch.object(team_service, "_send_invite_batch",
+                              new=self._stub_batch_sender(calls=batch_calls)), \
+                 patch.object(team_service, "add_team_member", new=stub_add_member), \
+                 patch.object(team_service, "_background_verify_admin_invites",
+                              new=self._noop_verify), \
+                 patch("app.services.team.settings_service.get_setting",
+                       new=self._batch_settings("2", "30")), \
+                 patch("app.services.team.asyncio.sleep", new=stub_sleep):
+                result = await team_service.add_team_members(101, emails, session)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(batch_calls), 2)
+        # 只有第 2 批之前等一次
+        self.assertEqual(sleeps, [30.0])
+
+    async def test_invite_batch_config_defaults_and_ceiling(self):
+        """配置缺省时用默认值；越界时收敛到可用范围。
+
+        批次大小必须被官方单次上限封顶——填大了不报错，但整批请求会被服务端拒掉。
+        """
+        team_service = TeamService()
+
+        async def stub_default(db_session, key, default=None):
+            return default
+
+        async with self.session_factory() as session:
+            with patch("app.services.team.settings_service.get_setting", new=stub_default):
+                size, interval = await team_service.get_invite_batch_config(session)
+
+        self.assertEqual(size, DEFAULT_INVITE_BATCH_SIZE)
+        self.assertEqual(interval, DEFAULT_INVITE_BATCH_INTERVAL_SECONDS)
+
+        async with self.session_factory() as session:
+            with patch("app.services.team.settings_service.get_setting",
+                       new=self._batch_settings("999", "99999")):
+                size, interval = await team_service.get_invite_batch_config(session)
+
+        self.assertEqual(size, ChatGPTService.MAX_INVITE_BATCH_SIZE)
+        self.assertEqual(interval, MAX_INVITE_BATCH_INTERVAL_SECONDS)
+
+        async with self.session_factory() as session:
+            with patch("app.services.team.settings_service.get_setting",
+                       new=self._batch_settings("0", "-5")):
+                size, interval = await team_service.get_invite_batch_config(session)
+
+        # 下限：每批至少 1 个，间隔不能为负
+        self.assertEqual(size, 1)
+        self.assertEqual(interval, 0.0)
 
     async def test_add_team_members_filters_invalid_duplicate_and_existing(self):
         await self._seed_team(current_members=1, max_members=5)
@@ -1803,6 +1988,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.session_factory() as session:
             with patch.object(team_service, "sync_team_info", new=stub_sync), \
+                 patch.object(team_service, "_send_invite_batch", new=self._stub_batch_sender()), \
                  patch.object(team_service, "add_team_member", new=stub_add_member):
                 result = await team_service.add_team_members(
                     101,
@@ -1852,6 +2038,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.session_factory() as session:
             with patch.object(team_service, "sync_team_info", new=stub_sync), \
+                 patch.object(team_service, "_send_invite_batch", new=self._stub_batch_sender()), \
                  patch.object(team_service, "add_team_member", new=stub_add_member):
                 result = await team_service.add_team_members(
                     101,
@@ -2108,6 +2295,7 @@ class TeamServiceBulkInviteTests(unittest.IsolatedAsyncioTestCase):
 
         async with self.session_factory() as session:
             with patch.object(team_service, "sync_team_info", new=stub_sync), \
+                 patch.object(team_service, "_send_invite_batch", new=self._stub_batch_sender()), \
                  patch.object(team_service, "add_team_member", new=stub_add_member):
                 result = await team_service.add_team_members(
                     101,

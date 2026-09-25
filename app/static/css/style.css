@@ -1374,7 +1374,151 @@ body.admin-theme .toast {
 
 /* 宽版模态框：成员管理等列数较多的表格用，窄屏下自动收缩 */
 .modal.modal-wide {
-    max-width: min(1180px, calc(100vw - 4rem));
+    max-width: min(1600px, calc(100vw - 2rem));
+}
+
+/* 成员弹窗里的批量操作进度条（批量邀请 / 批量踢人共用）。
+   类名与后台首页那套 .batch-progress-* 分开，避免两处样式互相覆盖。 */
+.member-progress {
+    display: none;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 1.25rem;
+    border: 1px solid var(--border-base, rgba(148, 163, 184, 0.35));
+    border-radius: var(--radius-md, 10px);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.member-progress.show {
+    display: block;
+}
+
+.member-progress-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.55rem;
+}
+
+.member-progress-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.member-progress-head-right {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.4rem;
+}
+
+/* 关闭按钮只在跑完之后出现：处理中没什么可关的，结果出来了才需要留着或收掉 */
+.member-progress-close {
+    display: none;
+    padding: 0 0.2rem;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1.15rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.member-progress-close:hover {
+    color: var(--text-main);
+}
+
+.member-progress.is-done .member-progress-close,
+.member-progress.is-failed .member-progress-close {
+    display: inline-block;
+}
+
+.member-progress-percent {
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+}
+
+.member-progress-bar {
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.25);
+    overflow: hidden;
+}
+
+.member-progress-bar-inner {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--info, #38bdf8), var(--success, #22c55e), var(--info, #38bdf8));
+    background-size: 200% 100%;
+    transition: width 0.28s ease;
+    animation: member-progress-shimmer 1.4s linear infinite;
+}
+
+.member-progress-text {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+    word-break: break-all;
+}
+
+/* 一次请求拿不到中间进度时（批量邀请）用滑动条，不假报百分比 */
+.member-progress.is-indeterminate .member-progress-bar-inner {
+    width: 40% !important;
+    animation: member-progress-slide 1.1s ease-in-out infinite,
+        member-progress-shimmer 1.4s linear infinite;
+}
+
+.member-progress.is-done .member-progress-bar-inner {
+    animation: none;
+    background: var(--success, #22c55e);
+}
+
+.member-progress.is-failed .member-progress-bar-inner {
+    animation: none;
+    background: var(--danger, #ef4444);
+}
+
+@keyframes member-progress-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: 0 0; }
+}
+
+@keyframes member-progress-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+}
+
+.bulk-select-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: flex-start;
+    margin-bottom: 0.9rem;
+}
+
+.bulk-select-row textarea {
+    flex: 1 1 320px;
+    min-height: 44px;
+    resize: vertical;
+}
+
+.bulk-select-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.bulk-select-hint {
+    flex: 1 1 100%;
+    min-height: 1.1em;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.bulk-select-hint.is-warn {
+    color: var(--warning);
 }
 
 /* ===== 定时踢人：时间选择 ===== */
