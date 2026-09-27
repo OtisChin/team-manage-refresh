@@ -455,8 +455,11 @@ class AccessDeadlineTests(unittest.TestCase):
 class AccountInfoExpiryTests(unittest.IsolatedAsyncioTestCase):
     """到期时间必须取 renews_at：OpenAI 的 expires_at 恒比它晚 6 小时，与账单不符。"""
 
-    @staticmethod
-    def _payload(renews_at, period_ends_at):
+    # 真实工作区 id 一律是 UUID；"default" 这类占位值必须被 get_account_info 丢弃
+    ACCOUNT_ID = "11111111-2222-3333-4444-555555555555"
+
+    @classmethod
+    def _payload(cls, renews_at, period_ends_at, account_id=None):
         entitlement = {"subscription_plan": "chatgptteamplan", "has_active_subscription": True}
         if renews_at is not None:
             entitlement["renews_at"] = renews_at
@@ -464,7 +467,7 @@ class AccountInfoExpiryTests(unittest.IsolatedAsyncioTestCase):
             entitlement["expires_at"] = period_ends_at
         return {
             "accounts": {
-                "acc-1": {
+                account_id or cls.ACCOUNT_ID: {
                     "account": {"name": "Org", "plan_type": "team", "account_user_role": "account-owner"},
                     "entitlement": entitlement,
                 }
@@ -500,6 +503,45 @@ class AccountInfoExpiryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(account["expires_at"], "2026-09-20T17:21:48+00:00")
         self.assertEqual(account["renews_at"], "")
+
+    async def test_skips_default_account_id(self):
+        """/accounts/check 会额外返回 account_id 为 "default" 的占位条目。
+
+        这种 id 拿去请求 /accounts/{id}/... 会被服务端以 422 uuid_parsing 拒绝，
+        /subscriptions 直接 500，结果是凭空多出一条"席位待同步"的幽灵 Team。
+        """
+        payload = self._payload(
+            renews_at="2026-09-20T11:21:48+00:00",
+            period_ends_at="2026-09-20T17:21:48+00:00",
+        )
+        payload["accounts"]["default"] = {
+            "account": {"name": "Personal", "plan_type": "team", "account_user_role": "account-owner"},
+            "entitlement": {"subscription_plan": "chatgptteamplan", "has_active_subscription": True},
+        }
+
+        service = ChatGPTService()
+
+        async def fake_make_request(method, url, headers, json_data=None, db_session=None, identifier="default"):
+            return {"success": True, "data": payload, "error": None}
+
+        service._make_request = fake_make_request
+        result = await service.get_account_info("token", db_session=None)
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual([a["account_id"] for a in result["accounts"]], [self.ACCOUNT_ID])
+
+
+class WorkspaceUuidTests(unittest.TestCase):
+    """占位 account_id 的判定：真实工作区是 UUID，其余一律丢弃。"""
+
+    def test_accepts_uuid(self):
+        self.assertTrue(ChatGPTService.is_workspace_uuid("19041291-bc36-42a0-8626-bef298e36b57"))
+        self.assertTrue(ChatGPTService.is_workspace_uuid("11111111-2222-3333-4444-555555555555"))
+
+    def test_rejects_placeholders(self):
+        for value in ("default", "personal", "none", "null", "me", "self", "", None, "acc-1", "org-abc"):
+            with self.subTest(value=value):
+                self.assertFalse(ChatGPTService.is_workspace_uuid(value))
 
 
 class FallbackMaxMembersTests(unittest.IsolatedAsyncioTestCase):

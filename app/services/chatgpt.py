@@ -562,6 +562,19 @@ class ChatGPTService:
         json_data = {"feature": feature, "value": value}
         return await self._make_request("POST", url, headers, json_data, db_session, identifier)
 
+    @staticmethod
+    def is_workspace_uuid(account_id: Any) -> bool:
+        """判断 account_id 是否是真实工作区 UUID。
+
+        OpenAI 的 workspace id 一律是 UUID；"default" 之类的占位值虽然会出现在
+        /accounts/check 的返回里，但拿去请求任何 /accounts/{id}/... 接口都会被拒。
+        """
+        try:
+            uuid.UUID(str(account_id))
+        except (ValueError, AttributeError, TypeError):
+            return False
+        return True
+
     async def get_account_info(
         self,
         access_token: str,
@@ -587,6 +600,14 @@ class ChatGPTService:
         for aid, info in accounts_data.items():
             account = info.get("account", {})
             entitlement = info.get("entitlement", {})
+            if not self.is_workspace_uuid(aid):
+                # /accounts/check 除真实工作区外还会带上个人 workspace 的占位条目
+                # （account_id 是 "default" 这类非 UUID 字符串），它的 plan_type 也可能是
+                # team。这种 id 拿去请求 /accounts/{id}/users|invites|settings 会被服务端
+                # 以 422 uuid_parsing 拒绝，/subscriptions 直接 500，结果是凭空多出一条
+                # 席位永远同步不到的 Team。真实工作区 id 一定是 UUID，非 UUID 一律丢弃。
+                logger.info(f"跳过非 UUID 的 workspace 条目: account_id={aid!r}")
+                continue
             if account.get("plan_type") == "team":
                 # 到期时间取 renews_at，而不是 expires_at。
                 # OpenAI 的 entitlement.expires_at 恒比 renews_at 晚 6 小时
